@@ -18,6 +18,8 @@ PY_DEPS_ONLY=false
 SYS_DEPS_ONLY=false
 CLEAR_VENV=false
 NUKE_CACHE=false
+GENERATOR_ONLY=false
+APT_UPDATED=false
 
 # Load cache dir from .env.validator if it exists, otherwise use default
 if [ -f ".env.validator" ]; then
@@ -50,6 +52,10 @@ while [[ $# -gt 0 ]]; do
             NUKE_CACHE=true
             shift
             ;;
+        --generator-only)
+            GENERATOR_ONLY=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -59,6 +65,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --sys-deps-only     Install only system dependencies"
             echo "  --clear-venv        Delete existing .venv directory (default is to preserve)"
             echo "  --nuke-cache        Unconditionally rm -rf the cache directory (~/.cache/sn34)"
+            echo "  --generator-only    Install only the external-API generator miner runtime"
             echo "  -h, --help         Show this help message"
             echo ""
             echo "Examples:"
@@ -68,6 +75,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --sys-deps-only Install only system dependencies"
             echo "  $0 --clear-venv    Install and delete existing virtual environment"
             echo "  $0 --nuke-cache    Install and unconditionally delete cache directory"
+            echo "  $0 --generator-only Install the generator without Torch/CUDA/validator dependencies"
             exit 0
             ;;
         *)
@@ -105,6 +113,18 @@ check_apt_get() {
         log_error "Could not find apt-get. Please install $1 manually"
         exit 1
     fi
+}
+
+update_package_lists() {
+    if [ "$APT_UPDATED" = true ]; then
+        return
+    fi
+    log_info "Updating package lists..."
+    if ! sudo apt-get update; then
+        log_error "Failed to update package lists"
+        exit 1
+    fi
+    APT_UPDATED=true
 }
 
 # Print banner
@@ -165,17 +185,13 @@ log_success "Python $python_version detected ✓"
 
 # Check and install required system dependencies (unless --no-system-deps is specified)
 if [ "$SKIP_SYSTEM_DEPS" = false ]; then
-    log_info "Checking system dependencies..."
-    if ! check_command pkg-config || ! check_command cmake || ! check_command ffmpeg; then
+    if [ "$GENERATOR_ONLY" = false ]; then
+        log_info "Checking validator system dependencies..."
+        if ! check_command pkg-config || ! check_command cmake || ! check_command ffmpeg; then
         log_info "Installing required system dependencies..."
         check_apt_get "pkg-config, cmake, and ffmpeg"
         
-        # Update package lists
-        log_info "Updating package lists..."
-        if ! sudo apt-get update; then
-            log_error "Failed to update package lists"
-            exit 1
-        fi
+        update_package_lists
         
         # Install dependencies
         log_info "Installing pkg-config, cmake, and ffmpeg..."
@@ -201,15 +217,17 @@ if [ "$SKIP_SYSTEM_DEPS" = false ]; then
         fi
         
         log_success "System dependencies installed and verified ✓"
-    else
-        log_success "System dependencies already installed ✓"
+        else
+            log_success "System dependencies already installed ✓"
+        fi
     fi
 
     log_info "Checking for Node.js and npm..."
     if ! check_command node || ! check_command npm; then
         log_info "Installing Node.js and npm..."
         check_apt_get "Node.js and npm"
-        
+        update_package_lists
+
         if ! sudo apt-get install -y nodejs npm; then
             log_error "Failed to install Node.js and npm via apt-get"
             log_error "Please install Node.js and npm manually"
@@ -275,14 +293,50 @@ else
         log_warning "Skipping system dependencies installation (--no-system-deps specified)"
     fi
     log_warning "Make sure you have the following installed manually:"
-    log_warning "  - pkg-config, cmake, ffmpeg"
-    log_warning "  - Google Chrome, libnss3, libnspr4, xvfb"
+    if [ "$GENERATOR_ONLY" = false ]; then
+        log_warning "  - pkg-config, cmake, ffmpeg"
+        log_warning "  - Google Chrome, libnss3, libnspr4, xvfb"
+    fi
     log_warning "  - Node.js, npm, PM2, dotenv"
 fi
 
 # Skip Python dependencies if only installing system dependencies
 if [ "$SYS_DEPS_ONLY" = false ]; then
-    if [ "$NUKE_CACHE" = true ]; then
+    if [ "$GENERATOR_ONLY" = true ]; then
+        log_info "Installing the external-API generator runtime only..."
+        if [ -d ".venv" ] && [ "$CLEAR_VENV" = true ]; then
+            log_info "Removing existing virtual environment (--clear-venv specified)..."
+            rm -rf .venv
+        elif [ -d ".venv" ]; then
+            if [ ! -x ".venv/bin/python" ]; then
+                log_error ".venv exists but has no usable Python interpreter."
+                log_error "Rerun with --generator-only --clear-venv to replace it."
+                exit 1
+            fi
+            log_info "Preserving existing virtual environment..."
+        fi
+
+        if [ ! -d ".venv" ]; then
+            log_info "Creating virtual environment without validator GPU packages..."
+            uv venv --python "$(command -v python3)" .venv
+        fi
+
+        GENERATOR_RUNTIME_DEPS=(
+            "bittensor==10.4.0"
+            "pillow==12.2.0"
+            "numpy==2.0.1"
+            "httpcore==1.0.9"
+            "httpx==0.28.1"
+            "async-substrate-interface==2.2.1"
+            "uvicorn==0.27.1"
+            "httptools>=0.6.0"
+            "python-dotenv==1.2.2"
+            "c2pa-python>=0.29.0"
+        )
+        uv pip install --python .venv/bin/python "${GENERATOR_RUNTIME_DEPS[@]}"
+        uv pip install --python .venv/bin/python --no-deps -e .
+        log_success "Generator runtime installed without adding Torch, CUDA, flash-attn, Janus, or CLIP ✓"
+    elif [ "$NUKE_CACHE" = true ]; then
         if [ -d "$CACHE_DIR" ]; then
             log_info "Nuking cache directory: $CACHE_DIR..."
             rm -rf "$CACHE_DIR"
@@ -328,6 +382,7 @@ if [ "$SYS_DEPS_ONLY" = false ]; then
         fi
     fi
 
+    if [ "$GENERATOR_ONLY" = false ]; then
     # Remove existing virtual environment if requested (default is to preserve)
     if [ -d ".venv" ] && [ "$CLEAR_VENV" = true ]; then
         log_info "Removing existing virtual environment..."
@@ -352,6 +407,7 @@ if [ "$SYS_DEPS_ONLY" = false ]; then
     log_success "Git dependencies installed ✓"
 
     log_success "Virtual environment created and dependencies installed ✓"
+    fi
 else
     log_warning "Skipping Python dependencies installation (--sys-deps-only specified)"
 fi
@@ -380,6 +436,8 @@ fi
 echo
 if [ "$SYS_DEPS_ONLY" = true ]; then
     log_success "🎉 System dependencies installation completed!"
+elif [ "$GENERATOR_ONLY" = true ]; then
+    log_success "🎉 Generator-only installation completed!"
 elif [ "$PY_DEPS_ONLY" = true ]; then
     log_success "🎉 Python dependencies installation completed!"
 else
@@ -396,18 +454,31 @@ if [ "$SYS_DEPS_ONLY" = false ]; then
     echo
     echo -e "${GREEN}2. CLI Quick Start:${NC}"
     echo -e "  ${YELLOW}gascli --help${NC}                   Show main help"
-    echo -e "  ${YELLOW}gascli validator start${NC}          Start validator services"
-    echo -e "  ${YELLOW}gascli miner push-discriminator${NC} Push a model"
+    if [ "$GENERATOR_ONLY" = true ]; then
+        echo -e "  ${YELLOW}gascli generator start${NC}          Start the generative miner"
+        echo -e "  ${YELLOW}gascli generator logs -f${NC}        Follow miner logs"
+    else
+        echo -e "  ${YELLOW}gascli validator start${NC}          Start validator services"
+        echo -e "  ${YELLOW}gascli miner push-discriminator${NC} Push a model"
+    fi
     echo
     echo -e "  ${GREEN}Available Aliases:${NC}"
     echo -e "    ${YELLOW}validator${NC} → ${YELLOW}vali${NC}, ${YELLOW}v${NC}"
     echo -e "    ${YELLOW}miner${NC} → ${YELLOW}m${NC}"
     echo
     echo -e "${GREEN}3. Important Notes:${NC}"
-    echo -e "  ${YELLOW}Validators:${NC} Make sure to update your .env.validator"
+    if [ "$GENERATOR_ONLY" = true ]; then
+        echo -e "  ${YELLOW}Generator:${NC} Make sure to update your .env.gen_miner"
+    else
+        echo -e "  ${YELLOW}Validators:${NC} Make sure to update your .env.validator"
+    fi
     if [ "$SKIP_SYSTEM_DEPS" = true ]; then
         echo -e "  ${YELLOW}System Dependencies:${NC} You skipped system dependency installation"
-        echo -e "  ${YELLOW}  Validators: ${NC} Make sure you have: pkg-config, cmake, ffmpeg, Chrome, Node.js, PM2"
+        if [ "$GENERATOR_ONLY" = true ]; then
+            echo -e "  ${YELLOW}  Generator: ${NC} Make sure you have: Node.js, npm, PM2, dotenv"
+        else
+            echo -e "  ${YELLOW}  Validators: ${NC} Make sure you have: pkg-config, cmake, ffmpeg, Chrome, Node.js, PM2"
+        fi
     fi
     echo
     echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
