@@ -1,0 +1,1129 @@
+#!/usr/bin/env python3
+"""
+GAS CLI - Simple Service Manager
+Hierarchical CLI tool for managing GAS miners and validators
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import click
+
+DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/sn34")
+
+
+class AliasedGroup(click.Group):
+    """A Click Group that supports command aliases and prefix matching."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Track aliases for help display
+        self._aliases = {}
+        # Track which commands are aliases (so we can exclude them from help)
+        self._alias_names = set()
+
+    def add_command(self, cmd, name=None):
+        """Override to track aliases"""
+        super().add_command(cmd, name)
+        if name and hasattr(cmd, "name") and name != cmd.name:
+            # This is an alias
+            if cmd.name not in self._aliases:
+                self._aliases[cmd.name] = []
+            self._aliases[cmd.name].append(name)
+            self._alias_names.add(name)
+
+    def list_commands(self, ctx):
+        """Return only main commands, not aliases"""
+        all_commands = super().list_commands(ctx)
+        # Filter out alias names, only return main command names
+        return [cmd for cmd in all_commands if cmd not in self._alias_names]
+
+    def get_command(self, ctx, cmd_name):
+        # First try to get the exact command
+        rv = super().get_command(ctx, cmd_name)
+        if rv is not None:
+            return rv
+
+        # Find matches that start with the given prefix (including aliases)
+        all_commands = super().list_commands(ctx)
+        matches = [x for x in all_commands if x.startswith(cmd_name)]
+
+        if not matches:
+            return None
+
+        if len(matches) == 1:
+            return click.Group.get_command(self, ctx, matches[0])
+
+        ctx.fail(f"Too many matches: {', '.join(sorted(matches))}")
+
+    def resolve_command(self, ctx, args):
+        # Always return the full command name
+        _, cmd, args = super().resolve_command(ctx, args)
+        return cmd.name, cmd, args
+
+    def format_commands(self, ctx, formatter):
+        """Format the commands list with aliases shown"""
+        commands = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            if cmd is None:
+                continue
+            if cmd.hidden:
+                continue
+
+            # Build command name with aliases
+            cmd_name = subcommand
+            if subcommand in self._aliases:
+                aliases = " | ".join(sorted(self._aliases[subcommand]))
+                cmd_name = f"{subcommand} ({aliases})"
+
+            commands.append((cmd_name, cmd.get_short_help_str()))
+
+        if commands:
+            with formatter.section("Commands"):
+                formatter.write_dl(commands)
+
+
+# Path constants
+SCRIPT_DIR = Path(__file__).parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+
+# Service names
+VALIDATOR = "sn34-validator"
+GENERATOR = "sn34-generator"
+DATA = "sn34-data"
+GENERATIVE_MINER = "bitmind-generative-miner"
+ALL_SERVICES = [VALIDATOR, GENERATOR, DATA]
+
+# Config file paths
+VALIDATOR_CONFIG = "validator.config.js"
+MINER_CONFIG = "gen_miner.config.js"
+ENV_VALIDATOR = ".env.validator"
+ENV_MINER = ".env.gen_miner"
+
+
+def get_python_interpreter():
+    """Get the appropriate Python interpreter path"""
+    python_interpreter = "python3"
+    venv_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        python_interpreter = str(venv_python)
+    click.echo(f"Using python interpreter: {python_interpreter}")
+    return python_interpreter
+
+
+def load_env():
+    """Load environment variables from .env.validator"""
+    # Get the absolute path to the .env.validator file
+    env_file = PROJECT_ROOT / ENV_VALIDATOR
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        os.environ[key] = value
+
+
+def run_pm2_command(cmd: str, service: Optional[str] = None):
+    """Run PM2 command and handle output"""
+    try:
+        if service:
+            result = subprocess.run(
+                ["pm2", cmd, service], capture_output=True, text=True, check=True
+            )
+        else:
+            result = subprocess.run(
+                ["pm2", cmd], capture_output=True, text=True, check=True
+            )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Error running PM2 command: {e}", err=True)
+        return None
+
+
+def clean_existing_services(services: List[str]):
+    """Clean up existing services"""
+    for service in services:
+        result = subprocess.run(["pm2", "list"], capture_output=True, text=True)
+        if service in result.stdout:
+            click.echo(f"Deleting existing {service}...")
+            subprocess.run(["pm2", "delete", service])
+            import time
+
+            time.sleep(1)
+
+
+def run_docker_compose(args: List[str], capture=False):
+    """Run a docker compose command from the project root"""
+    cmd = ["docker", "compose"] + args
+    if capture:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+        return result
+    else:
+        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+        return result
+
+
+def start_validator_services(no_generation=False, no_data_downloads=False):
+    """Start validator services using pm2 ecosystem config"""
+    click.echo("Starting validator services...")
+
+    # Login to W&B if API key is provided
+    wandb_key = os.environ.get("WANDB_API_KEY")
+    if wandb_key:
+        subprocess.run(["wandb", "login", wandb_key])
+
+    ecosystem_path = PROJECT_ROOT / VALIDATOR_CONFIG
+    if not ecosystem_path.exists():
+        click.echo(f"Error: {VALIDATOR_CONFIG} not found in project root.", err=True)
+        return False
+
+    os.environ["START_VALIDATOR"] = "true"
+    os.environ["START_GENERATOR"] = "false" if no_generation else "true"
+    os.environ["START_DATA"] = "false" if no_data_downloads else "true"
+
+    services_to_clean = [VALIDATOR]
+    if not no_generation:
+        services_to_clean.append(GENERATOR)
+    if not no_data_downloads:
+        services_to_clean.append(DATA)
+    clean_existing_services(services_to_clean)
+
+    result = subprocess.run(["pm2", "start", str(ecosystem_path)])
+
+    if result.returncode == 0:
+        services_started = ["validator"]
+        if not no_generation:
+            services_started.append("generator")
+        if not no_data_downloads:
+            services_started.append("data")
+        click.echo(f"Validator services started: {', '.join(services_started)}")
+    else:
+        click.echo("Failed to start validator services", err=True)
+
+    return result.returncode == 0
+
+
+def start_validator_services_docker(no_generation=False, no_data_downloads=False):
+    """Start validator services using Docker Compose"""
+    click.echo("Starting validator services via Docker...")
+
+    compose_file = PROJECT_ROOT / "docker-compose.yml"
+    if not compose_file.exists():
+        click.echo("Error: docker-compose.yml not found in project root.", err=True)
+        return False
+
+    env_file = PROJECT_ROOT / ENV_VALIDATOR
+    if not env_file.exists():
+        click.echo(
+            f"Error: {ENV_VALIDATOR} not found. Copy .env.validator.template and fill it in.",
+            err=True,
+        )
+        return False
+
+    os.environ["START_VALIDATOR"] = "true"
+    os.environ["START_GENERATOR"] = "false" if no_generation else "true"
+    os.environ["START_DATA"] = "false" if no_data_downloads else "true"
+
+    result = run_docker_compose(["up", "-d", "--build"])
+
+    if result.returncode == 0:
+        services_started = ["validator"]
+        if not no_generation:
+            services_started.append("generator")
+        if not no_data_downloads:
+            services_started.append("data")
+        click.echo(f"Validator services started: {', '.join(services_started)}")
+        click.echo("View logs: docker compose logs -f validator")
+    else:
+        click.echo("Failed to start validator services", err=True)
+
+    return result.returncode == 0
+
+
+# =============================================================================
+# MAIN CLI GROUP
+# =============================================================================
+
+
+@click.group(cls=AliasedGroup)
+@click.pass_context
+def cli(ctx):
+    """GAS CLI - Simple Service Manager for Miners and Validators"""
+    # Load environment variables
+    load_env()
+
+    # Set default values
+    os.environ.setdefault("DEVICE", "cuda")
+    os.environ.setdefault("SN34_CACHE_DIR", DEFAULT_CACHE_DIR)
+
+    # Suppress logs
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["DIFFUSERS_VERBOSITY"] = "error"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["HF_HUB_VERBOSITY"] = "error"
+    os.environ["ACCELERATE_LOG_LEVEL"] = "error"
+
+
+# =============================================================================
+# VALIDATOR COMMANDS
+# =============================================================================
+
+
+@cli.group(cls=AliasedGroup, name="validator")
+def validator():
+    """Validator management commands"""
+    pass
+
+
+# Add aliases for validator group
+cli.add_command(validator, name="vali")
+cli.add_command(validator, name="v")
+
+
+@validator.command()
+@click.option("--no-generation", is_flag=True, help="Skip starting generator")
+@click.option("--no-data-downloads", is_flag=True, help="Skip starting data service")
+@click.option("--docker", is_flag=True, help="Use Docker Compose instead of pm2")
+def start(no_generation, no_data_downloads, docker):
+    """Start validator services (pm2 by default, use --docker for Docker Compose)"""
+    load_env()
+    if docker:
+        return start_validator_services_docker(no_generation, no_data_downloads)
+    return start_validator_services(no_generation, no_data_downloads)
+
+
+@validator.command()
+@click.option(
+    "--service",
+    default="all",
+    help="Service to stop (validator, generator, data, or all) [pm2 mode only]",
+)
+@click.option("--docker", is_flag=True, help="Use Docker Compose instead of pm2")
+def stop(service, docker):
+    """Stop validator services (pm2 by default, use --docker for Docker Compose)"""
+    click.echo("Stopping validator services...")
+    if docker:
+        run_docker_compose(["stop"])
+    else:
+        if service == "all":
+            for service_name in ALL_SERVICES:
+                run_pm2_command("stop", service_name)
+        else:
+            service_map = {"validator": VALIDATOR, "generator": GENERATOR, "data": DATA}
+            run_pm2_command("stop", service_map.get(service, service))
+
+
+@validator.command()
+@click.option(
+    "--service",
+    default="all",
+    help="Service to delete (validator, generator, data, or all) [pm2 mode only]",
+)
+@click.option("--docker", is_flag=True, help="Use Docker Compose instead of pm2")
+def delete(service, docker):
+    """Delete validator services (pm2 by default, use --docker for Docker Compose)"""
+    click.echo("Deleting validator services...")
+    if docker:
+        run_docker_compose(["down"])
+    else:
+        if service == "all":
+            for service_name in ALL_SERVICES:
+                run_pm2_command("delete", service_name)
+        else:
+            service_map = {"validator": VALIDATOR, "generator": GENERATOR, "data": DATA}
+            run_pm2_command("delete", service_map.get(service, service))
+
+
+@validator.command()
+@click.option("--docker", is_flag=True, help="Use Docker Compose instead of pm2")
+def status(docker):
+    """Show status of validator services (pm2 by default, use --docker for Docker Compose)"""
+    if docker:
+        result = run_docker_compose(["ps"], capture=True)
+        if result.stdout and result.stdout.strip():
+            click.echo(result.stdout)
+        else:
+            click.echo("No validator services running")
+    else:
+        result = subprocess.run(["pm2", "list"], capture_output=True, text=True)
+        if result.stdout:
+            click.echo(result.stdout)
+        else:
+            click.echo("No validator services found")
+
+
+@validator.command()
+@click.option(
+    "--service",
+    default="all",
+    help="Service to show logs for (validator, generator, data, or all) [pm2 mode only]",
+)
+@click.option("--follow", "-f", is_flag=True, default=True, help="Follow log output")
+@click.option("--tail", default="100", help="Number of lines to show from end of logs")
+@click.option("--docker", is_flag=True, help="Use Docker Compose instead of pm2")
+def logs(service, follow, tail, docker):
+    """Show logs for validator services (pm2 by default, use --docker for Docker Compose)"""
+    if docker:
+        args = ["logs", "--tail", tail]
+        if follow:
+            args.append("-f")
+        args.append("validator")
+        run_docker_compose(args)
+    else:
+        if service == "all":
+            subprocess.run(["pm2", "logs"])
+        else:
+            service_map = {"validator": VALIDATOR, "generator": GENERATOR, "data": DATA}
+            subprocess.run(["pm2", "logs", service_map.get(service, service)])
+
+
+@validator.command(name="miner-stats")
+@click.option("--db-path", default=None, help="Path to the prompt database")
+@click.option("--uid", type=int, default=None, help="Show detailed stats for a specific miner UID")
+@click.option("--coldkey", default=None, help="Show detailed stats for all miners under a coldkey (SS58 address)")
+@click.option("--limit", type=int, default=20, help="Number of recent entries to show (default: 20)")
+@click.option("--since", "lookback_hours", type=float, default=None, help="Only consider records from the last N hours")
+@click.option("--by-coldkey", is_flag=True, help="Group the summary table by coldkey (queries chain metagraph)")
+@click.option("--chain-endpoint", default=None, help="Subtensor chain endpoint (used with --by-coldkey/--coldkey)")
+@click.option("--netuid", type=int, default=None, help="Subnet UID for metagraph lookup")
+@click.option("--failed", is_flag=True, help="List stored failed-verification media from failed_media/ dir")
+def miner_stats(db_path, uid, coldkey, limit, lookback_hours, by_coldkey, chain_endpoint, netuid, failed):
+    """Show miner verification stats: pass rates, uploads, challenge outcomes"""
+    if db_path is None:
+        db_path = os.path.join(DEFAULT_CACHE_DIR, "prompts.db")
+
+    miner_stats_script = SCRIPT_DIR / "cache" / "util" / "miner_stats.py"
+    python_interpreter = get_python_interpreter()
+
+    cmd = [python_interpreter, str(miner_stats_script), "--db-path", db_path]
+    if uid is not None:
+        cmd.extend(["--uid", str(uid)])
+    if coldkey is not None:
+        cmd.extend(["--coldkey", coldkey])
+    if limit != 20:
+        cmd.extend(["--limit", str(limit)])
+    if lookback_hours is not None:
+        cmd.extend(["--lookback-hours", str(lookback_hours)])
+    if by_coldkey:
+        cmd.append("--by-coldkey")
+    if chain_endpoint:
+        cmd.extend(["--chain-endpoint", chain_endpoint])
+    if netuid is not None:
+        cmd.extend(["--netuid", str(netuid)])
+    if failed:
+        cmd.append("--failed")
+
+    try:
+        result = subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ Miner stats failed with exit code {e.returncode}", err=True)
+        sys.exit(e.returncode)
+    except Exception as e:
+        click.echo(f"❌ Error running miner_stats script: {e}", err=True)
+        sys.exit(1)
+
+
+# =============================================================================
+# MINER COMMANDS
+# =============================================================================
+
+
+@cli.group(cls=AliasedGroup, name="discriminator")
+def discriminator():
+    """Discriminator miner management commands"""
+    pass
+
+
+# Add alias for discriminator group
+cli.add_command(discriminator, name="d")
+
+
+@discriminator.command()
+@click.option("--image-model", help="Path to image detector zip file")
+@click.option("--video-model", help="Path to video detector zip file")
+@click.option("--audio-model", help="Path to audio detector zip file")
+@click.option("--wallet-name", default="default", help="Bittensor wallet name")
+@click.option("--wallet-hotkey", default="default", help="Bittensor hotkey name")
+@click.option("--netuid", default=34, help="Subnet UID")
+@click.option("--chain-endpoint", help="Subtensor network endpoint")
+@click.option("--retry-delay", default=60, help="Retry delay in seconds")
+@click.option("--vertical", type=click.Choice(["general", "human"]), default="general", help="Competition vertical (default: general)")
+def push_discriminator(
+    image_model, video_model, audio_model, wallet_name, wallet_hotkey, netuid, chain_endpoint, retry_delay, vertical
+):
+    """Push discriminator model(s) and register on blockchain. At least one model zip file (image, video, or audio) must be provided."""
+    if not image_model and not video_model and not audio_model:
+        click.echo("Error: At least one model must be provided (--image-model, --video-model, or --audio-model)", err=True)
+        return
+
+    if vertical == "human" and audio_model:
+        click.echo(
+            "Error: The 'human' vertical is only available for image and video models. "
+            "Remove --audio-model, or use --vertical general.",
+            err=True
+        )
+        return
+
+    cmd = [sys.executable, "-m", "neurons.discriminator.push_model"]
+
+    if image_model:
+        cmd.extend(["--image-model", image_model])
+    if video_model:
+        cmd.extend(["--video-model", video_model])
+    if audio_model:
+        cmd.extend(["--audio-model", audio_model])
+
+    cmd.extend(["--wallet-name", wallet_name])
+    cmd.extend(["--wallet-hotkey", wallet_hotkey])
+    cmd.extend(["--netuid", str(netuid)])
+
+    if chain_endpoint:
+        cmd.extend(["--chain-endpoint", chain_endpoint])
+
+    cmd.extend(["--retry-delay", str(retry_delay)])
+    cmd.extend(["--vertical", vertical])
+
+    # Execute the push_model script
+    try:
+        result = subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        sys.exit(e.returncode)
+    except Exception as e:
+        sys.exit(1)
+
+
+discriminator.add_command(push_discriminator, name="push")
+
+
+@discriminator.command(name="performance")
+@click.option("--wallet-name", default="default", help="Bittensor wallet name")
+@click.option("--wallet-hotkey", default="default", help="Bittensor hotkey name")
+@click.option("--modality", type=click.Choice(["image", "video", "audio"]), default=None, help="Filter by modality")
+@click.option("--api-url", default=None, help="GAS API base URL (default: production)")
+def perf(wallet_name, wallet_hotkey, modality, api_url):
+    """Show your discriminator models: entrance exam results and benchmark scores."""
+    import bittensor as bt
+    from gas.protocol.miner_requests import fetch_models
+
+    try:
+        wallet = bt.Wallet(name=wallet_name, hotkey=wallet_hotkey)
+    except Exception as e:
+        click.echo(f"Error loading wallet: {e}", err=True)
+        sys.exit(1)
+
+    addr = wallet.hotkey.ss58_address
+    click.echo()
+    click.echo(f"  ⛽  {addr}")
+    click.echo()
+
+    result = fetch_models(wallet, modality=modality, api_url=api_url)
+
+    if not result["success"]:
+        click.echo(f"  ❌  {result['error']}", err=True)
+        sys.exit(1)
+
+    models = result["models"]
+    if not models:
+        click.echo("  No model submissions found for this round.")
+        return
+
+    from datetime import datetime, timezone
+
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    YELLOW = "\033[33m"
+    CYAN = "\033[36m"
+
+    def parse_ts(ts):
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+    def ago_str(ts):
+        t = parse_ts(ts)
+        if not t:
+            return ""
+        delta = datetime.now(timezone.utc) - t
+        total_mins = int(delta.total_seconds()) // 60
+        if total_mins < 1:
+            return "just now"
+        if total_mins < 60:
+            return f"{total_mins}m ago"
+        hrs = total_mins // 60
+        mins = total_mins % 60
+        if hrs < 24:
+            return f"{hrs}h {mins}m ago" if mins else f"{hrs}h ago"
+        days = hrs // 24
+        rem_hrs = hrs % 24
+        return f"{days}d {rem_hrs}h ago" if rem_hrs else f"{days}d ago"
+
+    def elapsed_str(ts):
+        t = parse_ts(ts)
+        if not t:
+            return ""
+        delta = datetime.now(timezone.utc) - t
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return f"{secs}s"
+        mins = secs // 60
+        if mins < 60:
+            return f"{mins}m {secs % 60}s"
+        hrs = mins // 60
+        return f"{hrs}h {mins % 60}m"
+
+    def _f(v):
+        return f"{v:.4f}" if v is not None else "—"
+
+    EXAM_STATUS_STYLE = {
+        "passed":    (GREEN + "✅ PASSED" + RESET, GREEN),
+        "failed":    (RED + "❌ FAILED" + RESET, RED),
+        "running":   (YELLOW + "⏳ RUNNING" + RESET, YELLOW),
+        "examining": (YELLOW + "⏳ EXAMINING" + RESET, YELLOW),
+        "pending":   (CYAN + "🕐 PENDING" + RESET, CYAN),
+        "uploaded":  (CYAN + "🕐 PENDING" + RESET, CYAN),
+    }
+    BENCH_STATUS_STYLE = {
+        "success": ("✅", GREEN),
+        "running": ("⏳", YELLOW),
+        "queued":  ("🕐", CYAN),
+        "failed":  ("❌", RED),
+    }
+
+    for m in models:
+        mod = m["modality"].upper()
+        vert = m["vertical"]
+        vert_tag = f"{YELLOW}{vert}{RESET}" if vert == "human" else f"{DIM}{vert}{RESET}"
+        uploaded = ago_str(m.get("upload_timestamp"))
+        uploaded_tag = f"  {DIM}·  uploaded {uploaded}{RESET}" if uploaded else ""
+
+        click.echo(f"  ── {BOLD}{mod}{RESET} ({vert_tag}){uploaded_tag}")
+        click.echo(f"  {DIM}model {m['model_id']}{RESET}")
+        click.echo()
+
+        # Exam status
+        exam_status = m.get("exam_status", "unknown")
+        exam_label, _ = EXAM_STATUS_STYLE.get(exam_status, (exam_status.upper(), ""))
+        click.echo(f"  exam    {exam_label}")
+
+        exam_reason = m.get("exam_reason")
+        if exam_reason:
+            for line in exam_reason.split(" | "):
+                click.echo(f"          {DIM}{line}{RESET}")
+
+        click.echo()
+
+        # Benchmark runs
+        runs = m.get("benchmark_runs") or []
+        if not runs:
+            if exam_status in ("failed",):
+                click.echo(f"  {DIM}(no benchmark runs — model must pass entrance exam first){RESET}")
+            elif exam_status in ("pending", "uploaded", "running", "examining"):
+                click.echo(f"  {DIM}(benchmark runs will appear after the entrance exam completes){RESET}")
+            else:
+                click.echo(f"  {DIM}(no benchmark runs yet){RESET}")
+        else:
+            for r in runs:
+                icon, color = BENCH_STATUS_STYLE.get(r["status"], ("•", ""))
+                r_vert = r["vertical"]
+                r_vert_tag = f"{YELLOW}{r_vert}{RESET}" if r_vert == "human" else f"{DIM}{r_vert}{RESET}"
+
+                if r.get("sn34_score") is not None:
+                    sn34 = r["sn34_score"]
+                    mcc = r.get("mcc")
+                    brier = r.get("brier")
+                    base_sn34 = r.get("base_sn34_score")
+                    aug_sn34 = r.get("aug_sn34_score")
+                    aug_mcc = r.get("aug_binary_mcc")
+                    aug_brier = r.get("aug_binary_brier")
+
+                    bar_len = 20
+                    filled = int(sn34 * bar_len)
+                    bar = f"{GREEN}{'█' * filled}{RESET}{DIM}{'░' * (bar_len - filled)}{RESET}"
+
+                    click.echo(f"  ┌─ {mod} │ {r_vert_tag} │ {bar}")
+                    click.echo(f"  │  SN34   {BOLD}{sn34:.4f}{RESET}")
+                    if aug_sn34 is not None:
+                        click.echo(f"  │  {DIM}        {'Base':>8}   {'Aug':>8}{RESET}")
+                        click.echo(f"  │  {DIM}SN34    {_f(base_sn34):>8}   {_f(aug_sn34):>8}{RESET}")
+                        click.echo(f"  │  {DIM}MCC     {_f(mcc):>8}   {_f(aug_mcc):>8}{RESET}")
+                        click.echo(f"  │  {DIM}Brier   {_f(brier):>8}   {_f(aug_brier):>8}{RESET}")
+                    else:
+                        click.echo(f"  │  {DIM}MCC  {_f(mcc)}    Brier  {_f(brier)}{RESET}")
+                else:
+                    status_str = f"{color}{icon} {r['status'].upper()}{RESET}"
+                    elapsed = elapsed_str(r.get("started_at")) if r["status"] in ("running", "queued") else ""
+                    time_tag = f"  {DIM}({elapsed}){RESET}" if elapsed else ""
+                    click.echo(f"  ┌─ {mod} │ {r_vert_tag} │ {status_str}{time_tag}")
+                    click.echo(f"  │  {DIM}Scores pending…{RESET}")
+
+                run_ago = ago_str(r.get("started_at"))
+                time_suffix = f"  {DIM}·  {run_ago}{RESET}" if run_ago else ""
+                click.echo(f"  └─ {DIM}{r['run_id']}{RESET}{time_suffix}")
+                click.echo()
+
+        click.echo()
+
+
+discriminator.add_command(perf, name="perf")
+
+
+@discriminator.command(name="benchmark", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.option("--image-model", help="Path to image detector safetensors zip file")
+@click.option("--video-model", help="Path to video detector safetensors zip file")
+@click.option("--audio-model", help="Path to audio detector safetensors zip file")
+@click.pass_context
+def benchmark(ctx, image_model, video_model, audio_model):
+    """Run image/video/audio benchmarks for provided detector models using gasbench.
+    All other options are passed directly to gasbench. Use 'gasbench --help' to see available options.
+    Common options: --debug, --small, --full, --gasstation-only, --cache-dir, --output-dir
+    """
+    if not image_model and not video_model and not audio_model:
+        click.echo("Error: At least one model must be provided (--image-model, --video-model, or --audio-model)", err=True)
+        return
+
+    def run_gasbench(model_path, modality_flag):
+        click.echo(f"Running benchmark on {model_path}...")
+        cmd = ["gasbench", "run", modality_flag, model_path] + ctx.args
+
+        try:
+            result = subprocess.run(cmd, check=True)
+            if result.returncode == 0:
+                click.echo(f"✅ Benchmark completed successfully!")
+        except subprocess.CalledProcessError as e:
+            click.echo(f"❌ Benchmark failed with exit code {e.returncode}", err=True)
+            sys.exit(e.returncode)
+        except Exception as e:
+            click.echo(f"❌ Error running benchmark: {e}", err=True)
+            sys.exit(1)
+
+    if image_model:
+        run_gasbench(image_model, "--image-model")
+
+    if video_model:
+        run_gasbench(video_model, "--video-model")
+
+    if audio_model:
+        run_gasbench(audio_model, "--audio-model")
+
+# =============================================================================
+# GENERATOR COMMANDS
+# =============================================================================
+
+
+@cli.group(cls=AliasedGroup, name="generator")
+def generator():
+    """Generative miner management commands"""
+    pass
+
+
+# Add aliases for generator group
+cli.add_command(generator, name="gen")
+cli.add_command(generator, name="g")
+
+
+def load_miner_env():
+    """Load environment variables from .env.gen_miner"""
+    # Get the absolute path to the .env.gen_miner file
+    env_file = PROJECT_ROOT / ENV_MINER
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        os.environ[key] = value
+
+
+def start_miner_services():
+    """Start generative miner using ecosystem config"""
+    click.echo("Starting generative miner...")
+
+    # Load miner environment variables
+    load_miner_env()
+
+    # Use ecosystem config to start miner
+    ecosystem_path = PROJECT_ROOT / MINER_CONFIG
+    if not ecosystem_path.exists():
+        click.echo(f"Error: {MINER_CONFIG} not found in project root.", err=True)
+        return False
+
+    # Clean up existing miner service
+    result = subprocess.run(["pm2", "list"], capture_output=True, text=True)
+    if GENERATIVE_MINER in result.stdout:
+        click.echo(f"Deleting existing {GENERATIVE_MINER}...")
+        subprocess.run(["pm2", "delete", GENERATIVE_MINER])
+        import time
+        time.sleep(1)
+
+    # Start miner using ecosystem config
+    result = subprocess.run(["pm2", "start", str(ecosystem_path)])
+
+    if result.returncode == 0:
+        click.echo("✅ Generative miner started successfully!")
+        # Show status
+        subprocess.run(["pm2", "show", GENERATIVE_MINER])
+    else:
+        click.echo("❌ Generative miner failed to start", err=True)
+
+    return result.returncode == 0
+
+
+@generator.command()
+def start():
+    """Start the generative miner"""
+    load_miner_env()
+    return start_miner_services()
+
+
+@generator.command()
+def stop():
+    """Stop the generative miner"""
+    click.echo("Stopping generative miner...")
+    run_pm2_command("stop", GENERATIVE_MINER)
+
+
+@generator.command()
+def delete():
+    """Delete the generative miner"""
+    click.echo("Deleting generative miner...")
+    run_pm2_command("delete", GENERATIVE_MINER)
+
+
+@generator.command()
+def restart():
+    """Restart the generative miner"""
+    click.echo("Restarting generative miner...")
+    run_pm2_command("restart", GENERATIVE_MINER)
+
+
+@generator.command()
+def status():
+    """Show status of the generative miner"""
+    result = subprocess.run(["pm2", "show", GENERATIVE_MINER], capture_output=True, text=True)
+    if result.stdout:
+        click.echo(result.stdout)
+    else:
+        click.echo("Generative miner not found")
+
+
+@generator.command()
+@click.option("--lines", "-n", default=50, help="Number of log lines to show")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output")
+def logs(lines, follow):
+    """Show generative miner logs"""
+
+    if follow:
+        # Follow logs in real-time
+        subprocess.run(["pm2", "logs", GENERATIVE_MINER, "--lines", str(lines)])
+    else:
+        # Show recent logs
+        result = subprocess.run(["pm2", "logs", GENERATIVE_MINER, "--lines", str(lines), "--nostream"],
+                              capture_output=True, text=True)
+        if result.stdout:
+            click.echo(result.stdout)
+        else:
+            click.echo("No logs found for generative miner")
+
+
+@generator.command()
+def info():
+    """Show generative miner information and configuration"""
+    load_miner_env()
+
+    click.echo("=== Generative Miner Configuration ===")
+    click.echo(f"Wallet Name: {os.environ.get('BT_WALLET_NAME', 'miner1')}")
+    click.echo(f"Wallet Hotkey: {os.environ.get('BT_WALLET_HOTKEY', 'default')}")
+    click.echo(f"Network: {os.environ.get('BT_CHAIN_ENDPOINT', 'wss://test.finney.opentensor.ai:443')}")
+    click.echo(f"NetUID: {os.environ.get('BT_NETUID', '379')}")
+    click.echo(f"Axon Port: {os.environ.get('BT_AXON_PORT', '8093')}")
+    click.echo(f"Device: {os.environ.get('MINER_DEVICE', 'auto')}")
+    click.echo(f"Output Directory: {os.environ.get('MINER_OUTPUT_DIR', '/tmp/generated_content')}")
+    click.echo(f"Max Concurrent Tasks: {os.environ.get('MINER_MAX_CONCURRENT_TASKS', '5')}")
+
+    click.echo("\n=== API Keys Status ===")
+
+    # Dynamically get API key requirements from all available services
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT))
+        from neurons.generator.services.service_registry import ServiceRegistry
+
+        registry = ServiceRegistry()
+        api_keys = registry.get_all_api_key_requirements()
+
+        if api_keys:
+            for key, description in api_keys.items():
+                status = "✅ Configured" if os.environ.get(key) else "❌ Not configured"
+                click.echo(f"{description}: {status}")
+        else:
+            click.echo("No API key requirements found from services")
+
+    except Exception as e:
+        click.echo(f"❌ Could not load service API key requirements: {e}")
+        # Fallback to basic message
+        click.echo("Run the generator to see API key status")
+
+
+@generator.command(name="performance")
+@click.option(
+    "--wallet-name",
+    default=None,
+    help="Bittensor wallet name (default: BT_WALLET_NAME from .env.gen_miner, else 'default')",
+)
+@click.option(
+    "--wallet-hotkey",
+    default=None,
+    help="Bittensor hotkey name (default: BT_WALLET_HOTKEY from .env.gen_miner, else 'default')",
+)
+@click.option("--modality", type=click.Choice(["image", "video", "audio"]), default=None, help="Filter fool-rate aggregate by modality")
+@click.option("--lookback-days", default=7, type=int, show_default=True, help="Fool-rate parquet lookback (days)")
+@click.option("--api-url", default=None, help="GAS API base URL (default: GAS_API_URL env or production)")
+@click.option("--json", "as_json", is_flag=True, help="Print raw API JSON")
+def gen_perf(wallet_name, wallet_hotkey, modality, lookback_days, api_url, as_json):
+    """Query your generator verification stats + aggregated fool rate (Epistula-authenticated GAS API).
+
+    The request is signed with your hotkey (same Epistula flow as discriminator ``d perf``).
+    """
+    import json as json_lib
+
+    import bittensor as bt
+    from gas.protocol.miner_requests import fetch_generator_performance
+
+    load_miner_env()
+    wn = wallet_name or os.environ.get("BT_WALLET_NAME", "default")
+    wh = wallet_hotkey or os.environ.get("BT_WALLET_HOTKEY", "default")
+
+    try:
+        wallet = bt.Wallet(name=wn, hotkey=wh)
+    except Exception as e:
+        click.echo(f"Error loading wallet: {e}", err=True)
+        sys.exit(1)
+
+    addr = wallet.hotkey.ss58_address
+    click.echo()
+    click.echo(f"  ⛽  generator  {addr}")
+    click.echo()
+
+    result = fetch_generator_performance(
+        wallet,
+        modality=modality,
+        lookback_days=lookback_days,
+        api_url=api_url,
+    )
+
+    if not result["success"]:
+        click.echo(f"  ❌  {result['error']}", err=True)
+        sys.exit(1)
+
+    data = result["data"]
+    if as_json:
+        click.echo(json_lib.dumps(data, indent=2, default=str))
+        return
+
+    ver = data.get("verification") or {}
+    fool = data.get("fool_aggregate") or {}
+
+    click.echo("  Verification (validator uploads, latest snapshot per validator)")
+    click.echo(
+        f"    validators reporting: {ver.get('validator_count', 0)}"
+        f"    │    aggregate pass rate: {ver.get('aggregate_pass_rate')!s}"
+    )
+    click.echo(
+        f"    total verified / failed / evaluated: "
+        f"{ver.get('total_verified', 0)} / {ver.get('total_failed', 0)} / {ver.get('total_evaluated', 0)}"
+    )
+    by_v = ver.get("by_validator") or []
+    if by_v:
+        click.echo("    per-validator:")
+        for row in by_v:
+            vhk = (row.get("validator_hotkey") or "")[:16] + "…"
+            pr = row.get("pass_rate")
+            click.echo(
+                f"      {vhk}  pass_rate={pr!s}  "
+                f"v={row.get('total_verified', 0)}  f={row.get('total_failed', 0)}  "
+                f"lookback_h={row.get('lookback_hours')!s}"
+            )
+    else:
+        click.echo("    (no verification rows yet)")
+    click.echo()
+
+    click.echo(f"  Fool rate aggregate (benchmark parquets, last {lookback_days}d)")
+    ts = fool.get("total_samples", 0)
+    if ts:
+        click.echo(
+            f"    fool_rate={fool.get('fool_rate')!s}    samples={ts}    "
+            f"fooled={fool.get('fooled_count', 0)}    not_fooled={fool.get('not_fooled_count', 0)}    "
+            f"benchmark_runs={fool.get('benchmark_run_count', 0)}"
+        )
+    else:
+        click.echo("    (no benchmark samples in window)")
+    click.echo()
+
+
+generator.add_command(gen_perf, name="perf")
+
+
+@generator.command(name="verify-c2pa")
+@click.argument("files", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("-v", "--verbose", is_flag=True, help="Show raw manifest data")
+@click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
+def verify_c2pa_cmd(files, verbose, as_json):
+    """Verify C2PA credentials on image/video files.
+
+    Tests whether files have valid C2PA signatures from trusted AI generators.
+    This is the same verification validators use to accept/reject submissions.
+
+    Examples:
+        gascli generator verify-c2pa image.png
+        gascli generator verify-c2pa *.png --verbose
+        gascli generator verify-c2pa video.mp4 --json
+    """
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from neurons.generator.helper.verify_c2pa import run_verification
+
+    all_passed = run_verification(list(files), verbose=verbose, as_json=as_json)
+    if not all_passed:
+        sys.exit(1)
+
+
+# =============================================================================
+# GLOBAL COMMANDS (for backward compatibility and convenience)
+# =============================================================================
+
+
+@cli.command()
+def status():
+    """Show status of all services (global command)"""
+    result = subprocess.run(["pm2", "list"], capture_output=True, text=True)
+    if result.stdout:
+        click.echo(result.stdout)
+    else:
+        click.echo("No services found")
+
+
+@cli.command(name="install-py-deps")
+@click.option("--clear-venv", is_flag=True, help="Delete existing .venv directory (default is to preserve)")
+@click.option("--nuke-cache", is_flag=True, help="Unconditionally rm -rf the cache directory (~/.cache/sn34)")
+def install_py_deps(clear_venv, nuke_cache):
+    """Install Python dependencies via uv"""
+    click.echo("Installing Python dependencies...")
+
+    # Get the path to install.sh in the project root
+    install_script = PROJECT_ROOT / "install.sh"
+
+    if not install_script.exists():
+        click.echo("Error: install.sh not found in project root.", err=True)
+        return False
+
+    # Build command args
+    cmd_args = [str(install_script), "--py-deps-only"]
+    if clear_venv:
+        cmd_args.append("--clear-venv")
+    if nuke_cache:
+        cmd_args.append("--nuke-cache")
+
+    # Run install.sh with appropriate flags
+    try:
+        result = subprocess.run(cmd_args, check=True)
+        click.echo("✅ Python dependencies installation completed!")
+        return result.returncode == 0
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ Python dependencies installation failed with exit code {e.returncode}", err=True)
+        return False
+    except Exception as e:
+        click.echo(f"❌ Error running install script: {e}", err=True)
+        return False
+
+
+@cli.command(name="install-sys-deps")
+@click.option("--clear-venv", is_flag=True, help="Delete existing .venv directory (default is to preserve)")
+@click.option("--nuke-cache", is_flag=True, help="Unconditionally rm -rf the cache directory (~/.cache/sn34)")
+def install_sys_deps(clear_venv, nuke_cache):
+    """Install system dependencies"""
+    click.echo("Installing system dependencies...")
+
+    # Get the path to install.sh in the project root
+    install_script = PROJECT_ROOT / "install.sh"
+
+    if not install_script.exists():
+        click.echo("Error: install.sh not found in project root.", err=True)
+        return False
+
+    # Build command args
+    cmd_args = [str(install_script), "--sys-deps-only"]
+    if clear_venv:
+        cmd_args.append("--clear-venv")
+    if nuke_cache:
+        cmd_args.append("--nuke-cache")
+
+    # Run install.sh with appropriate flags
+    try:
+        result = subprocess.run(cmd_args, check=True)
+        click.echo("✅ System dependencies installation completed!")
+        return result.returncode == 0
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ System dependencies installation failed with exit code {e.returncode}", err=True)
+        return False
+    except Exception as e:
+        click.echo(f"❌ Error running install script: {e}", err=True)
+        return False
+
+
+@cli.command()
+@click.option("--clear-venv", is_flag=True, help="Delete existing .venv directory (default is to preserve)")
+@click.option("--nuke-cache", is_flag=True, help="Unconditionally rm -rf the cache directory (~/.cache/sn34)")
+def install(clear_venv, nuke_cache):
+    """Run full installation (system + Python dependencies)"""
+    click.echo("Running full installation...")
+
+    # Get the path to install.sh in the project root
+    install_script = PROJECT_ROOT / "install.sh"
+
+    if not install_script.exists():
+        click.echo("Error: install.sh not found in project root.", err=True)
+        return False
+
+    # Build command args
+    cmd_args = [str(install_script)]
+    if clear_venv:
+        cmd_args.append("--clear-venv")
+    if nuke_cache:
+        cmd_args.append("--nuke-cache")
+
+    # Run install.sh with appropriate flags
+    try:
+        result = subprocess.run(cmd_args, check=True)
+        click.echo("✅ Full installation completed!")
+        return result.returncode == 0
+    except subprocess.CalledProcessError as e:
+        click.echo(f"❌ Full installation failed with exit code {e.returncode}", err=True)
+        return False
+    except Exception as e:
+        click.echo(f"❌ Error running install script: {e}", err=True)
+        return False
+
+
+if __name__ == "__main__":
+    # Check if we're in a virtual environment, if not, try to use the project's venv
+    if not hasattr(sys, "real_prefix") and not (
+        hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix
+    ):
+        # Not in a virtual environment, try to use the project's venv
+        venv_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+        if venv_python.exists():
+            # Re-execute with the venv Python interpreter
+            os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+
+    cli()

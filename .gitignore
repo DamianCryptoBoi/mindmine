@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.coverage
+*.ipynb
+
+# Node.js
+node_modules/
+package.json
+package-lock.json
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.Python
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+\#*\#
+.#*
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables (catch-all; templates stay tracked)
+.env
+.env.*
+*.env
+!*.env.template
+!.env.*.template
+
+# Model files and cache
+*.pth
+*.pt
+*.ckpt
+*.onnx
+.cache/
+downloaded_models/*
+
+# Bittensor specific
+~/.bittensor/
+*.wallet
+
+base_miner/test_output/*
+generated_content/*
+wandb/*
+sample-images/
