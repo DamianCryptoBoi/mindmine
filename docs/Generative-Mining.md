@@ -101,13 +101,27 @@ PR — we're happy to add new providers and trust anchors.
   polling and download failures retry the existing request.
 - **Website**: [maxcheapai.com](https://maxcheapai.com/en/docs)
 
+### CKey Service
+- **API Key**: `CKEY_API_KEY`
+- **Modalities**: Image
+- **Models**: `wowztools/nano-banana-pro`, falling back to
+  `wowztools/Nano-Banana-2` after the initial request and three retries fail
+- **Resolution mapping**: SN34's 1K/2K/4K tiers request square
+  1024x1024/2048x2048/4096x4096 output
+- **C2PA**: The downloaded Google CDN bytes are returned without resizing or
+  transcoding. Live samples from both models pass SN34's trusted-issuer verifier.
+- **Retries**: Each model receives one initial attempt plus three retries. HTTP,
+  response parsing, missing URL, and media download failures all consume an attempt.
+- **Endpoint**: [api.xah.io](https://api.xah.io/v1/images/generations)
+
 ### Service Selection
 
 Configure which service handles each modality in your `.env.gen_miner` file:
 
 ```bash
-IMAGE_SERVICE=maxcheapai    # openai, openrouter, stabilityai, maxcheapai, or none
+IMAGE_SERVICE=ckey          # openai, openrouter, stabilityai, maxcheapai, ckey, or none
 VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
+CKEY_API_KEY=your_ckey_api_key
 MAXCHEAPAI_API_KEY=mcai_your_key
 ```
 
@@ -271,6 +285,9 @@ Your miner exposes these endpoints for validators:
 - `MINER_TASK_TIMEOUT`: Legacy compatibility timeout (default: 1800 seconds)
 - `MAXCHEAPAI_POLL_TIMEOUT`: MaxCheapAI generation deadline (default: 1800 seconds)
 - `MAXCHEAPAI_MAX_RETRIES`: Retries after a provider-reported failure (default: 3)
+- `CKEY_REQUEST_TIMEOUT`: CKey synchronous generation timeout (default: 1800 seconds)
+- `CKEY_DOWNLOAD_TIMEOUT`: CKey media download timeout (default: 600 seconds)
+- `CKEY_RETRY_DELAY`: Delay between CKey attempts (default: 10 seconds)
 - `MINER_OUTPUT_DIR`: Directory for generated content and logs
 - `MINER_DEVICE`: Computing device (`auto`, `cuda`, `cpu`) [Deprecated: local modals currently not supported]
 
