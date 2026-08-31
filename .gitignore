@@ -72,4 +72,4 @@ base_miner/test_output/*
 generated_content/*
 wandb/*
 sample-images/
-sn61-bot-virus/
+sn61-bot-virus
