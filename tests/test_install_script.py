@@ -70,6 +70,7 @@ if [ "$1" = "--version" ]; then echo '10.0.0'; fi
     assert "uvicorn==0.27.1" in commands
     assert "c2pa-python>=0.29.0" in commands
     assert "python-dotenv==1.2.2" in commands
+    assert "google-genai==2.20.0" in commands
     assert "uv pip install --python .venv/bin/python --no-deps -e ." in commands
     for unwanted in (
         "uv sync",

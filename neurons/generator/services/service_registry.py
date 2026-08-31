@@ -9,6 +9,7 @@ from .stabilityai_service import StabilityAIService
 from .runway_service import RunwayService
 from .maxcheapai_service import MaxCheapAIService
 from .ckey_service import CKeyService
+from .vertexai_service import VertexAIService
 
 
 SERVICE_MAP = {
@@ -18,6 +19,7 @@ SERVICE_MAP = {
     "runway": RunwayService,
     "maxcheapai": MaxCheapAIService,
     "ckey": CKeyService,
+    "vertexai": VertexAIService,
     # "local": LocalService,  # disabled: local generation has no C2PA provenance,
     # so it fails validator verification. See local_service.py header before enabling.
 }
@@ -28,7 +30,7 @@ class ServiceRegistry:
     Registry for managing generation services.
 
     Set per-modality service via env vars:
-      IMAGE_SERVICE=openai|openrouter|stabilityai|maxcheapai|ckey|none
+      IMAGE_SERVICE=openai|openrouter|stabilityai|maxcheapai|ckey|vertexai|none
       VIDEO_SERVICE=openai|openrouter|stabilityai|runway|maxcheapai|none
 
     Services:
@@ -40,6 +42,7 @@ class ServiceRegistry:
       - runway: Runway text-to-video (requires RUNWAYML_API_KEY or RUNWAYML_API_SECRET)
       - maxcheapai: Nano Banana Pro images + Veo 3.1 video (requires MAXCHEAPAI_API_KEY)
       - ckey: Nano Banana Pro images with Nano Banana 2 fallback (requires CKEY_API_KEY)
+      - vertexai: Gemini 3.1 Flash Lite images through Vertex AI (uses Google ADC)
       - none: Disable this modality (requests will be rejected)
 
     If not set, falls back to loading all available services.
@@ -159,7 +162,7 @@ class ServiceRegistry:
     def get_all_api_key_requirements(self) -> Dict[str, str]:
         """Get API key requirements from all services."""
         all_requirements = {
-            "IMAGE_SERVICE": "Service for images: openai, openrouter, stabilityai, maxcheapai, ckey, or none",
+            "IMAGE_SERVICE": "Service for images: openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, or none",
             "VIDEO_SERVICE": "Service for videos: openai, openrouter, stabilityai, runway, maxcheapai, or none",
         }
 

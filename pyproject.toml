@@ -49,6 +49,7 @@ dependencies = [
     "imagehash>=4.3.1",
     "c2pa-python>=0.29.0",
     "runwayml>=4.13.0",
+    "google-genai==2.20.0",
 ]
 
 [project.scripts]

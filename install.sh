@@ -332,6 +332,7 @@ if [ "$SYS_DEPS_ONLY" = false ]; then
             "httptools>=0.6.0"
             "python-dotenv==1.2.2"
             "c2pa-python>=0.29.0"
+            "google-genai==2.20.0"
         )
         uv pip install --python .venv/bin/python "${GENERATOR_RUNTIME_DEPS[@]}"
         uv pip install --python .venv/bin/python --no-deps -e .

@@ -114,14 +114,34 @@ PR — we're happy to add new providers and trust anchors.
   response parsing, missing URL, and media download failures all consume an attempt.
 - **Endpoint**: [api.xah.io](https://api.xah.io/v1/images/generations)
 
+### Vertex AI Service
+- **Authentication**: Google Application Default Credentials (ADC); no Gemini API
+  key is used
+- **Modality**: Image
+- **Model**: `gemini-3.1-flash-lite-image`
+- **Resolution mapping**: SN34's 1K/2K/4K tiers map directly to Vertex AI's
+  1K/2K/4K image size, with square JPEG output
+- **C2PA**: Vertex AI's original JPEG bytes are returned without resizing or
+  transcoding. A live generated sample passed SN34's trusted Google issuer,
+  signature, and AI-generated assertions.
+- **Retries**: One initial request plus three retries; configure the delay with
+  `VERTEXAI_RETRY_DELAY` (default: 10 seconds)
+- **Timeout**: Each request is bounded by `VERTEXAI_REQUEST_TIMEOUT` (default:
+  600 seconds), so a stalled provider call advances through the retry budget
+- **Location**: `VERTEXAI_LOCATION=global` by default, independently of
+  `GOOGLE_CLOUD_LOCATION`
+
 ### Service Selection
 
 Configure which service handles each modality in your `.env.gen_miner` file:
 
 ```bash
-IMAGE_SERVICE=ckey          # openai, openrouter, stabilityai, maxcheapai, ckey, or none
+IMAGE_SERVICE=vertexai      # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, or none
 VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
-CKEY_API_KEY=your_ckey_api_key
+VERTEXAI_PROJECT=your_google_cloud_project
+VERTEXAI_LOCATION=global
+VERTEXAI_REQUEST_TIMEOUT=600
+# GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
 MAXCHEAPAI_API_KEY=mcai_your_key
 ```
 
@@ -288,6 +308,12 @@ Your miner exposes these endpoints for validators:
 - `CKEY_REQUEST_TIMEOUT`: CKey synchronous generation timeout (default: 1800 seconds)
 - `CKEY_DOWNLOAD_TIMEOUT`: CKey media download timeout (default: 600 seconds)
 - `CKEY_RETRY_DELAY`: Delay between CKey attempts (default: 10 seconds)
+- `VERTEXAI_PROJECT`: Vertex AI Google Cloud project; falls back to
+  `GOOGLE_CLOUD_PROJECT`, then the project discovered from ADC
+- `VERTEXAI_LOCATION`: Vertex endpoint location (default: `global`)
+- `VERTEXAI_REQUEST_TIMEOUT`: Per-attempt Vertex request timeout in seconds
+  (default: 600)
+- `VERTEXAI_RETRY_DELAY`: Delay between Vertex AI attempts (default: 10 seconds)
 - `MINER_OUTPUT_DIR`: Directory for generated content and logs
 - `MINER_DEVICE`: Computing device (`auto`, `cuda`, `cpu`) [Deprecated: local modals currently not supported]
 
