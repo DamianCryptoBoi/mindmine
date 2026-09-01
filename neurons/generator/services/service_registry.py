@@ -42,7 +42,7 @@ class ServiceRegistry:
       - runway: Runway text-to-video (requires RUNWAYML_API_KEY or RUNWAYML_API_SECRET)
       - maxcheapai: Nano Banana Pro images + Veo 3.1 video (requires MAXCHEAPAI_API_KEY)
       - ckey: Nano Banana Pro images with Nano Banana 2 fallback (requires CKEY_API_KEY)
-      - vertexai: Gemini 3.1 Flash Lite images through Vertex AI (uses Google ADC)
+      - vertexai: Nano Banana Pro images through Vertex AI (uses Google ADC)
       - none: Disable this modality (requests will be rejected)
 
     If not set, falls back to loading all available services.

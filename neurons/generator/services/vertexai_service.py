@@ -12,7 +12,7 @@ from google.genai import types
 from .base_service import BaseGenerationService
 from ..task_manager import GenerationTask
 
-MODEL = "gemini-3.1-flash-lite-image"
+MODEL = "gemini-3-pro-image"
 IMAGE_TIERS = {"1K", "2K", "4K"}
 MAX_RETRIES = 3
 
@@ -106,7 +106,6 @@ class VertexAIService(BaseGenerationService):
                     image_size=resolution,
                     output_mime_type="image/jpeg",
                 ),
-                thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
             ),
         }
         for attempt in range(MAX_RETRIES + 1):

@@ -118,7 +118,7 @@ PR — we're happy to add new providers and trust anchors.
 - **Authentication**: Google Application Default Credentials (ADC); no Gemini API
   key is used
 - **Modality**: Image
-- **Model**: `gemini-3.1-flash-lite-image`
+- **Model**: Nano Banana Pro (`gemini-3-pro-image`)
 - **Resolution mapping**: SN34's 1K/2K/4K tiers map directly to Vertex AI's
   1K/2K/4K image size, with square JPEG output
 - **C2PA**: Vertex AI's original JPEG bytes are returned without resizing or

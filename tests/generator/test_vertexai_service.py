@@ -100,15 +100,16 @@ def test_vertex_maps_sn34_tier_and_returns_untouched_jpeg(monkeypatch, resolutio
     assert client_args[0]["http_options"].timeout == 600_000
     assert len(fake_models.calls) == 1
     call = fake_models.calls[0]
-    assert call["model"] == "gemini-3.1-flash-lite-image"
+    assert call["model"] == "gemini-3-pro-image"
     assert call["contents"][0].parts[0].text == ("A red fox running through fresh snow")
     assert call["config"].image_config.image_size == resolution
     assert call["config"].image_config.aspect_ratio == "1:1"
     assert call["config"].image_config.output_mime_type == "image/jpeg"
+    assert call["config"].thinking_config is None
     assert result == {
         "data": original_media,
         "metadata": {
-            "model": "gemini-3.1-flash-lite-image",
+            "model": "gemini-3-pro-image",
             "provider": "vertexai",
             "mime_type": "image/jpeg",
         },
