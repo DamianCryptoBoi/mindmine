@@ -126,8 +126,8 @@ Discriminative miners submit detection models for evaluation against a wide vari
 
 Generative miners generate synthetic images and videos according to prompts from validators, and are rewarded based on their ability to pass validation checks and fool discriminative miners.
 
-The generative miner supports MaxCheapAI Nano Banana Pro images and Veo 3.1
-video, including restart-safe provider polling and multi-hotkey PM2 deployment.
+The generative miner supports C2PA-preserving providers including VertexGen and
+MaxCheapAI, with restart-safe provider polling and multi-hotkey PM2 deployment.
 See the [Generative Mining Guide](docs/Generative-Mining.md).
 
 #### Validators [[docs](docs/Validating.md)]

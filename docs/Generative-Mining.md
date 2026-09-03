@@ -131,17 +131,34 @@ PR — we're happy to add new providers and trust anchors.
 - **Location**: `VERTEXAI_LOCATION=global` by default, independently of
   `GOOGLE_CLOUD_LOCATION`
 
+### VertexGen Service
+- **API Key**: `VERTEXGEN_API_KEY`
+- **Modality**: Image
+- **Model**: Google Nano Banana Pro (`nano-banana-pro`)
+- **Resolution and aspect ratio**: SN34's requested 1K/2K/4K tier and supported
+  aspect ratio are forwarded directly
+- **C2PA**: The authenticated content response is returned byte-for-byte without
+  resizing or transcoding. A live 2K PNG validated as Trusted against the official
+  C2PA trust list, signed by Google Media Processing Services, with Google
+  Generative AI and SynthID assertions.
+- **Restart safety**: The provider job ID and retry number are checkpointed. A
+  restarted miner resumes the existing job instead of submitting a duplicate.
+- **Retries**: Definitive provider failures are retried with a fresh idempotency
+  key. Ambiguous submission, polling, and download failures retry the same key or
+  job to avoid duplicate charges. Both use `VERTEXGEN_MAX_RETRIES` (default: 3).
+- **Endpoint**: `http://107.178.109.250:8686/v1` by default; this is plain HTTP.
+  Set `VERTEXGEN_API_BASE_URL` to an HTTPS endpoint when available so bearer keys
+  are encrypted in transit.
+
 ### Service Selection
 
 Configure which service handles each modality in your `.env.gen_miner` file:
 
 ```bash
-IMAGE_SERVICE=vertexai      # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, or none
+IMAGE_SERVICE=vertexgen     # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, vertexgen, or none
 VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
-VERTEXAI_PROJECT=your_google_cloud_project
-VERTEXAI_LOCATION=global
-VERTEXAI_REQUEST_TIMEOUT=600
-# GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/to/service-account.json
+VERTEXGEN_API_KEY=your_vertexgen_key
+VERTEXGEN_API_BASE_URL=http://107.178.109.250:8686/v1
 MAXCHEAPAI_API_KEY=mcai_your_key
 ```
 
@@ -314,6 +331,15 @@ Your miner exposes these endpoints for validators:
 - `VERTEXAI_REQUEST_TIMEOUT`: Per-attempt Vertex request timeout in seconds
   (default: 600)
 - `VERTEXAI_RETRY_DELAY`: Delay between Vertex AI attempts (default: 10 seconds)
+- `VERTEXGEN_WAIT_SECONDS`: Seconds the submission call waits before returning an
+  asynchronous job (default: 20; maximum: 30)
+- `VERTEXGEN_REQUEST_TIMEOUT`: Submission and status request timeout (default: 60 seconds)
+- `VERTEXGEN_POLL_INTERVAL`: Delay between job status requests (default: 2 seconds)
+- `VERTEXGEN_POLL_TIMEOUT`: Overall job polling deadline (default: 600 seconds)
+- `VERTEXGEN_DOWNLOAD_TIMEOUT`: Image download timeout (default: 600 seconds)
+- `VERTEXGEN_MAX_RETRIES`: Same-request retries after transient failures and fresh
+  submissions after definitive provider failures (default: 3)
+- `VERTEXGEN_RETRY_DELAY`: Delay between VertexGen request retries (default: 10 seconds)
 - `MINER_OUTPUT_DIR`: Directory for generated content and logs
 - `MINER_DEVICE`: Computing device (`auto`, `cuda`, `cpu`) [Deprecated: local modals currently not supported]
 
