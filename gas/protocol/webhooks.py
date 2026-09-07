@@ -383,7 +383,7 @@ def send_success_webhook(
     port: int,
     max_retries: int = 3,
     retry_delay: float = 2.0,
-    timeout: float = 30.0
+    timeout: float = 300.0
 ):
     binary_data = result.get("data")
     if not binary_data:
@@ -415,7 +415,7 @@ def send_failure_webhook(
     port: int,
     max_retries: int = 3,
     retry_delay: float = 2.0,
-    timeout: float = 30.0
+    timeout: float = 300.0
 ):
     def _send():
         try:
