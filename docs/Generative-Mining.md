@@ -150,15 +150,30 @@ PR — we're happy to add new providers and trust anchors.
   Set `VERTEXGEN_API_BASE_URL` to an HTTPS endpoint when available so bearer keys
   are encrypted in transit.
 
+### GPTi2 Service
+- **API Key**: `GPTI2_API_KEY`
+- **Modality**: Image
+- **Model**: OpenAI GPT Image 2 (`gpt-image-2`)
+- **Resolution mapping**: SN34's requested 1K/2K/4K tier and aspect ratio map to
+  GPTi2's corresponding supported pixel dimensions. Invalid values fall back to
+  square 1K.
+- **Quality**: `low`, `medium`, and `high` are supported; omitted or invalid values
+  use the provider's lowest-cost `low` tier. High-quality requests use durable
+  asynchronous jobs because GPTi2 requires that route.
+- **C2PA**: Base64 image bytes and asynchronous job downloads are returned without
+  resizing or transcoding, preserving the provider's signed manifest.
+- **Restart safety**: High-quality job IDs are checkpointed so a restarted miner
+  resumes polling instead of submitting and paying for another image.
+- **Endpoint**: [gpti2.store](https://gpti2.store/v1)
+
 ### Service Selection
 
 Configure which service handles each modality in your `.env.gen_miner` file:
 
 ```bash
-IMAGE_SERVICE=vertexgen     # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, vertexgen, or none
+IMAGE_SERVICE=gpti2         # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, vertexgen, gpti2, or none
 VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
-VERTEXGEN_API_KEY=your_vertexgen_key
-VERTEXGEN_API_BASE_URL=http://107.178.109.250:8686/v1
+GPTI2_API_KEY=sk-your-key
 MAXCHEAPAI_API_KEY=mcai_your_key
 ```
 
