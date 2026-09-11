@@ -3,8 +3,7 @@
 set -euo pipefail
 
 readonly NVM_INSTALL_RELEASE="v0.40.6"
-readonly REPOSITORY_URL="https://github.com/DamianCryptoBoi/mindmine.git"
-readonly INSTALL_DIRECTORY="$HOME/getmesomemoney"
+readonly PROJECT_DIRECTORY="$(pwd -P)"
 readonly OS_RELEASE_PATH="${SETUP_OS_RELEASE_FILE:-/etc/os-release}"
 
 info() {
@@ -14,29 +13,6 @@ info() {
 fail() {
     printf '[setup] ERROR: %s\n' "$1" >&2
     exit 1
-}
-
-validate_checkout() {
-    local checkout_root git_root origin_url
-
-    checkout_root=$(cd "$INSTALL_DIRECTORY" && pwd -P)
-    git_root=$(git -C "$INSTALL_DIRECTORY" rev-parse --show-toplevel 2>/dev/null) || \
-        fail "$INSTALL_DIRECTORY is not a valid Git checkout."
-    git_root=$(cd "$git_root" && pwd -P)
-    [[ "$git_root" == "$checkout_root" ]] || \
-        fail "$INSTALL_DIRECTORY is nested inside another Git checkout."
-    git -C "$INSTALL_DIRECTORY" rev-parse --verify HEAD >/dev/null 2>&1 || \
-        fail "$INSTALL_DIRECTORY has no valid checked-out revision."
-
-    origin_url=$(git -C "$INSTALL_DIRECTORY" remote get-url origin 2>/dev/null) || \
-        fail "$INSTALL_DIRECTORY has no origin remote."
-    [[ "$origin_url" == "$REPOSITORY_URL" ]] || \
-        fail "$INSTALL_DIRECTORY is not the expected repository ($REPOSITORY_URL)."
-
-    git -C "$INSTALL_DIRECTORY" ls-files --error-unmatch -- install.sh >/dev/null 2>&1 || \
-        fail "install.sh is not tracked by the miner repository."
-    git -C "$INSTALL_DIRECTORY" diff --quiet HEAD -- install.sh || \
-        fail "install.sh has local changes. Restore it before rerunning setup."
 }
 
 if [[ ! -r "$OS_RELEASE_PATH" ]]; then
@@ -49,6 +25,10 @@ if [[ "${ID:-}" != "ubuntu" ]] || [[ "${VERSION_ID:-}" != "22.04" && "${VERSION_
     fail "Unsupported operating system: ${PRETTY_NAME:-unknown}. Use Ubuntu 22.04 or 24.04."
 fi
 
+if [[ ! -f "$PROJECT_DIRECTORY/pyproject.toml" || ! -f "$PROJECT_DIRECTORY/install.sh" || ! -f "$PROJECT_DIRECTORY/.env.gen_miner.template" ]]; then
+    fail "Run this script from the miner repository root after cloning it."
+fi
+
 if [[ "$EUID" -eq 0 ]]; then
     ELEVATE=()
 else
@@ -59,6 +39,7 @@ fi
 
 info "Installing Ubuntu packages"
 "${ELEVATE[@]}" apt-get update
+"${ELEVATE[@]}" env DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 "${ELEVATE[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     ca-certificates \
@@ -103,22 +84,14 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 command -v uv >/dev/null 2>&1 || fail "uv installation failed."
 
-if [[ ! -e "$INSTALL_DIRECTORY" ]]; then
-    info "Cloning miner into $INSTALL_DIRECTORY"
-    git clone "$REPOSITORY_URL" "$INSTALL_DIRECTORY"
-elif [[ ! -d "$INSTALL_DIRECTORY" ]] || ! git -C "$INSTALL_DIRECTORY" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    fail "$INSTALL_DIRECTORY exists but is not a Git checkout. Move it aside and rerun this script."
-else
-    info "Reusing existing checkout at $INSTALL_DIRECTORY"
-fi
-
-[[ -f "$INSTALL_DIRECTORY/pyproject.toml" && -f "$INSTALL_DIRECTORY/install.sh" ]] || \
-    fail "$INSTALL_DIRECTORY is not a valid miner checkout."
-validate_checkout
+info "Installing btcli as a per-user tool"
+uv tool install --force bittensor-cli==9.22.0
+uv tool update-shell
+command -v btcli >/dev/null 2>&1 || fail "btcli installation failed."
 
 info "Installing the generator miner runtime"
 (
-    cd "$INSTALL_DIRECTORY"
+    cd "$PROJECT_DIRECTORY"
     bash ./install.sh --generator-only
 )
 
@@ -127,10 +100,12 @@ cat <<EOF
 VPS setup complete. The miner has not been configured or started.
 
 Manual next steps:
-  1. cd $INSTALL_DIRECTORY
-  2. cp .env.gen_miner.template .env.gen_miner
-  3. Edit .env.gen_miner and restore/copy the Bittensor wallet for this user.
-  4. source "$NVM_DIR/nvm.sh"
+  1. Open a new shell, or reload the tool paths now:
+       export PATH="\$HOME/.local/bin:\$PATH"
+       source "$NVM_DIR/nvm.sh"
+  2. cd $PROJECT_DIRECTORY
+  3. Use btcli to create or restore this user's Bittensor wallet.
+  4. cp .env.gen_miner.template .env.gen_miner and edit it.
   5. pm2 start gen_miner.config.js
   6. pm2 save
 
