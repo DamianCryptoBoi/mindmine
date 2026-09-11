@@ -60,6 +60,7 @@ class GenerativeChallengeManager:
         # Use threading.Lock instead of asyncio.Lock because FastAPIThreadedServer
         # runs in a separate thread with its own event loop
         self.challenge_lock = threading.Lock()
+        self.media_processing_lock = threading.Lock()
 
         # Track generator liveness: hotkey -> last activity timestamp
         # Updated when a generator successfully responds to a challenge
@@ -297,7 +298,7 @@ class GenerativeChallengeManager:
             bt.logging.error(f"Task {task_id} from {format_uid_info()} (IP: {client_ip}): Empty binary payload received")
             return Response(status_code=400, content="Empty binary payload")
 
-        # copy the challenge info and release the lock before doing async work.
+        # Atomically claim the task before yielding to blocking work.
         with self.challenge_lock:
             bt.logging.debug(f"Callback for task {task_id}: Current active tasks: {list(self.challenge_tasks.keys())}")
             if task_id not in self.challenge_tasks:
@@ -307,8 +308,7 @@ class GenerativeChallengeManager:
                 # while still indicating the task wasn't found in our debug logs
                 return Response(status_code=200, content="Task not found in current session")
 
-            # Copy the challenge info so we can release the lock before async work
-            challenge_info = self.challenge_tasks[task_id].copy()
+            challenge_info = self.challenge_tasks.pop(task_id)
             generator_uid = challenge_info["uid"]
 
         auth_uid_msg = f" (auth UID: {uid})" if uid != generator_uid and uid != "unknown" else ""
@@ -317,46 +317,70 @@ class GenerativeChallengeManager:
             f"type: {content_type}, size: {len(binary_data)} bytes (IP: {client_ip})"
         )
 
-        # Perform async storage work outside the lock
-        filepath, error_message = await self.store_binary_content(
-            binary_data, content_type, generator_uid, task_id
+        # Media decoding, hashing, C2PA verification, and storage are blocking.
+        storage_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.store_binary_content,
+                binary_data,
+                content_type,
+                generator_uid,
+                task_id,
+                challenge_info,
+            )
         )
+        cancellation = None
+        try:
+            filepath, error_message = await asyncio.shield(storage_task)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            filepath, error_message = await storage_task
 
-        # Re-acquire lock to update task status and clean up
-        with self.challenge_lock:
-            # Check if task still exists (could have been cleaned up by another process)
-            if task_id not in self.challenge_tasks:
-                if filepath:
-                    bt.logging.debug(f"Task {task_id} already removed, but content was stored at {filepath}")
-                    return Response(status_code=200, content="Binary content received")
-                return Response(status_code=200, content="Task already processed")
+        if filepath:
+            bt.logging.success(
+                f"Task {task_id} completed with binary upload: {filepath}"
+            )
 
-            if filepath:
-                self.challenge_tasks[task_id]["status"] = "completed"
-                self.challenge_tasks[task_id]["filepath"] = filepath
-                bt.logging.success(f"Task {task_id} completed with binary upload: {filepath}")
+            # Track generator liveness - record when they successfully responded
+            miner_hotkey = self.metagraph.hotkeys[generator_uid]
+            self.generator_last_seen[miner_hotkey] = time.time()
+            bt.logging.debug(
+                f"Updated liveness for generator {miner_hotkey[:16]}... (UID {generator_uid})"
+            )
 
-                # Track generator liveness - record when they successfully responded
-                miner_hotkey = self.metagraph.hotkeys[generator_uid]
-                self.generator_last_seen[miner_hotkey] = time.time()
-                bt.logging.debug(f"Updated liveness for generator {miner_hotkey[:16]}... (UID {generator_uid})")
+            if cancellation is not None:
+                raise cancellation
+            return Response(status_code=200, content="Binary content received")
 
-                del self.challenge_tasks[task_id]
-                return Response(status_code=200, content="Binary content received")
-
-            # Storage failed — release lock before DB call
-            failure_reason = error_message or "Failed to store binary content"
-            del self.challenge_tasks[task_id]
-
+        failure_reason = error_message or "Failed to store binary content"
         self.content_manager.update_challenge_outcome(
             task_id=task_id,
             status="failed",
             failure_reason=failure_reason,
         )
+        if cancellation is not None:
+            raise cancellation
         return Response(status_code=400, content=failure_reason)
 
-    async def store_binary_content(
-        self, binary_data: bytes, content_type: str, generator_uid: int, task_id: str
+    def store_binary_content(
+        self,
+        binary_data: bytes,
+        content_type: str,
+        generator_uid: int,
+        task_id: str,
+        task_info: dict,
+    ) -> tuple[Optional[str], Optional[str]]:
+        with self.media_processing_lock:
+            return self._store_binary_content(
+                binary_data, content_type, generator_uid, task_id, task_info
+            )
+
+    def _store_binary_content(
+        self,
+        binary_data: bytes,
+        content_type: str,
+        generator_uid: int,
+        task_id: str,
+        task_info: dict,
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Store binary content directly uploaded by miner using ContentManager.
@@ -386,12 +410,6 @@ class GenerativeChallengeManager:
                         content_type=content_type,
                     )
                 return None, reason
-
-            # Get task info from challenge tracker
-            task_info = self.challenge_tasks.get(task_id)
-            if not task_info:
-                bt.logging.error(f"Task {task_id} not found in challenge tasks")
-                return None, "Task not found in challenge tasks"
 
             modality = task_info["modality"]
             media_type = task_info["media_type"]
