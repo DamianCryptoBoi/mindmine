@@ -13,7 +13,7 @@ class ImmediateThread:
         self.target()
 
 
-def test_default_webhook_timeout_is_five_minutes(monkeypatch):
+def test_default_webhook_timeout_is_thirty_seconds(monkeypatch):
     parser = argparse.ArgumentParser()
     add_miner_args(parser)
 
@@ -25,5 +25,5 @@ def test_default_webhook_timeout_is_five_minutes(monkeypatch):
     webhooks.send_success_webhook(task, {"data": b"image"}, None, "127.0.0.1", 8093)
     webhooks.send_failure_webhook(task, None, "127.0.0.1", 8093)
 
-    assert getattr(parser.parse_args([]), "miner.webhook_timeout") == 300.0
-    assert [call[-1] for call in calls] == [300.0, 300.0]
+    assert getattr(parser.parse_args([]), "miner.webhook_timeout") == 30.0
+    assert [call[-1] for call in calls] == [30.0, 30.0]

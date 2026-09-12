@@ -210,7 +210,7 @@ def add_miner_args(parser):
     parser.add_argument(
         "--miner.webhook-timeout",
         type=float,
-        default=300.0,
+        default=30.0,
         help="Timeout for webhook requests in seconds",
     )
 
