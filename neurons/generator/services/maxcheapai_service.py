@@ -51,7 +51,7 @@ class MaxCheapAIService(BaseGenerationService):
         super().__init__(config)
         self.api_key = os.getenv("MAXCHEAPAI_API_KEY", "").strip()
         self.base_url = os.getenv("MAXCHEAPAI_API_BASE_URL", API_BASE).rstrip("/")
-        self.speed = os.getenv("MAXCHEAPAI_SPEED", "slow").strip().lower()
+        self.speed = os.getenv("MAXCHEAPAI_SPEED", "priority").strip().lower()
         if self.speed not in {"slow", "normal", "priority"}:
             raise ValueError("MAXCHEAPAI_SPEED must be one of: slow, normal, priority")
 

@@ -5,6 +5,8 @@ set -euo pipefail
 readonly NVM_INSTALL_RELEASE="v0.40.6"
 readonly PROJECT_DIRECTORY="$(pwd -P)"
 readonly OS_RELEASE_PATH="${SETUP_OS_RELEASE_FILE:-/etc/os-release}"
+readonly COMMAND_BIN_DIRECTORY="${SETUP_COMMAND_BIN_DIR:-/usr/local/bin}"
+readonly USER_COMMAND_DIRECTORY="$HOME/.local/bin"
 
 info() {
     printf '[setup] %s\n' "$1"
@@ -13,6 +15,27 @@ info() {
 fail() {
     printf '[setup] ERROR: %s\n' "$1" >&2
     exit 1
+}
+
+expose_command() {
+    local command_name="$1"
+    local source_path="$2"
+    local target_path="$COMMAND_BIN_DIRECTORY/$command_name"
+
+    [[ -x "$source_path" ]] || fail "$source_path is missing or not executable."
+    if [[ "$source_path" == "$target_path" ]]; then
+        return
+    fi
+    if [[ -L "$target_path" ]]; then
+        [[ "$(readlink "$target_path")" == "$source_path" ]] || \
+            fail "Refusing to replace existing command link: $target_path"
+        return
+    fi
+    if [[ -e "$target_path" ]]; then
+        fail "Refusing to replace existing command: $target_path"
+    fi
+    "${ELEVATE[@]}" mkdir -p "$COMMAND_BIN_DIRECTORY"
+    "${ELEVATE[@]}" ln -s "$source_path" "$target_path"
 }
 
 if [[ ! -r "$OS_RELEASE_PATH" ]]; then
@@ -28,6 +51,10 @@ fi
 if [[ ! -f "$PROJECT_DIRECTORY/pyproject.toml" || ! -f "$PROJECT_DIRECTORY/install.sh" || ! -f "$PROJECT_DIRECTORY/.env.gen_miner.template" ]]; then
     fail "Run this script from the miner repository root after cloning it."
 fi
+case ":$PATH:" in
+    *":$COMMAND_BIN_DIRECTORY:"*) ;;
+    *) fail "$COMMAND_BIN_DIRECTORY must already be on PATH so uv and btcli remain available after setup exits." ;;
+esac
 
 if [[ "$EUID" -eq 0 ]]; then
     ELEVATE=()
@@ -77,17 +104,21 @@ nvm alias default 'lts/*'
 nvm use default
 npm install -g pm2
 
-export PATH="$HOME/.local/bin:$PATH"
-if ! command -v uv >/dev/null 2>&1; then
+export PATH="$USER_COMMAND_DIRECTORY:$PATH"
+UV_COMMAND_PATH="$USER_COMMAND_DIRECTORY/uv"
+if [[ ! -x "$UV_COMMAND_PATH" ]]; then
     info "Installing uv"
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
-command -v uv >/dev/null 2>&1 || fail "uv installation failed."
+[[ -x "$UV_COMMAND_PATH" ]] || fail "uv installation failed."
 
 info "Installing btcli as a per-user tool"
-uv tool install --force bittensor-cli==9.22.0
-uv tool update-shell
-command -v btcli >/dev/null 2>&1 || fail "btcli installation failed."
+"$UV_COMMAND_PATH" tool install --force bittensor-cli==9.22.0
+"$UV_COMMAND_PATH" tool update-shell
+BTCLI_COMMAND_PATH="$USER_COMMAND_DIRECTORY/btcli"
+[[ -x "$BTCLI_COMMAND_PATH" ]] || fail "btcli installation failed."
+expose_command uv "$UV_COMMAND_PATH"
+expose_command btcli "$BTCLI_COMMAND_PATH"
 
 info "Installing the generator miner runtime"
 (
@@ -98,14 +129,13 @@ info "Installing the generator miner runtime"
 cat <<EOF
 
 VPS setup complete. The miner has not been configured or started.
+uv and btcli are available immediately through $COMMAND_BIN_DIRECTORY.
 
 Manual next steps:
-  1. Open a new shell, or reload the tool paths now:
-       export PATH="\$HOME/.local/bin:\$PATH"
-       source "$NVM_DIR/nvm.sh"
-  2. cd $PROJECT_DIRECTORY
-  3. Use btcli to create or restore this user's Bittensor wallet.
-  4. cp .env.gen_miner.template .env.gen_miner and edit it.
+  1. cd $PROJECT_DIRECTORY
+  2. Use btcli to create or restore this user's Bittensor wallet.
+  3. cp .env.gen_miner.template .env.gen_miner and edit it.
+  4. source "$NVM_DIR/nvm.sh"
   5. pm2 start gen_miner.config.js
   6. pm2 save
 

@@ -17,7 +17,8 @@ def _fake_vps(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
     bin_dir = tmp_path / "bin"
     state_dir = tmp_path / "state"
     project_dir = tmp_path / "miner"
-    for directory in (home, bin_dir, state_dir, project_dir):
+    command_bin_dir = tmp_path / "command-bin"
+    for directory in (home, bin_dir, state_dir, project_dir, command_bin_dir):
         directory.mkdir()
 
     (project_dir / "pyproject.toml").write_text('[project]\nname = "gas"\n')
@@ -84,6 +85,7 @@ cat > "$HOME/.local/bin/uv" <<'UV'
 #!/bin/bash
 printf '%s\n' "$*" >> "$SETUP_TEST_STATE/uv-tool.log"
 case "$*" in
+  "--version") printf 'uv 0.8.0\n' ;;
   "tool install --force bittensor-cli==9.22.0")
     touch "$SETUP_TEST_STATE/btcli-tool-installed"
     printf '#!/bin/bash\necho "btcli 9.22.0"\n' > "$HOME/.local/bin/btcli"
@@ -128,9 +130,10 @@ esac
     env.update(
         {
             "HOME": str(home),
-            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "PATH": f"{bin_dir}:{command_bin_dir}:/usr/bin:/bin",
             "SETUP_OS_RELEASE_FILE": str(os_release),
             "SETUP_TEST_STATE": str(state_dir),
+            "SETUP_COMMAND_BIN_DIR": str(command_bin_dir),
         }
     )
     return env, home, state_dir, project_dir
@@ -194,12 +197,24 @@ def test_prepares_current_checkout_without_starting_or_configuring_miner(tmp_pat
     assert not (state_dir / "git.log").exists()
     assert str(project_dir) in result.stdout
     assert "btcli" in result.stdout
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in result.stdout
+    assert "uv and btcli are available immediately" in result.stdout
     assert "pm2 start gen_miner.config.js" in result.stdout
     installer_urls = (state_dir / "installer-urls").read_text()
     assert "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.6/install.sh" in installer_urls
     assert "https://astral.sh/uv/install.sh" in installer_urls
     assert (home / ".local" / "bin" / "btcli").exists()
+    for command in ("uv", "btcli"):
+        command_link = tmp_path / "command-bin" / command
+        assert command_link.is_symlink()
+        assert command_link.resolve() == (home / ".local" / "bin" / command).resolve()
+        command_result = subprocess.run(
+            [command, "--version"],
+            cwd=project_dir,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert command_result.returncode == 0, command_result.stderr
 
 
 def test_rejects_unsupported_linux_before_changing_the_server(tmp_path):
@@ -239,6 +254,33 @@ def test_rerun_preserves_existing_virtual_environment(tmp_path):
     assert second_run.returncode == 0, second_run.stdout + second_run.stderr
     assert sentinel.read_text() == "existing environment"
     assert not (state_dir / "git.log").exists()
+
+
+def test_refuses_to_overwrite_an_unrelated_global_command(tmp_path):
+    env, _, state_dir, project_dir = _fake_vps(tmp_path)
+    existing_uv = Path(env["SETUP_COMMAND_BIN_DIR"]) / "uv"
+    _write_executable(existing_uv, "#!/bin/bash\necho 'unrelated uv'\n")
+
+    result = _run_setup(env, project_dir)
+
+    assert result.returncode != 0
+    assert "Refusing to replace" in result.stderr
+    assert existing_uv.read_text() == "#!/bin/bash\necho 'unrelated uv'\n"
+    assert not (state_dir / "generator-runtime-installed").exists()
+
+
+def test_requires_global_command_directory_on_parent_path(tmp_path):
+    env, _, state_dir, project_dir = _fake_vps(tmp_path)
+    command_bin_dir = env["SETUP_COMMAND_BIN_DIR"]
+    env["PATH"] = ":".join(
+        entry for entry in env["PATH"].split(":") if entry != command_bin_dir
+    )
+
+    result = _run_setup(env, project_dir)
+
+    assert result.returncode != 0
+    assert "must already be on PATH" in result.stderr
+    assert not (state_dir / "apt.log").exists()
 
 
 def test_updates_an_existing_nvm_when_it_is_not_the_pinned_version(tmp_path):

@@ -49,6 +49,15 @@ def configure_service(monkeypatch):
     return MaxCheapAIService()
 
 
+def test_defaults_to_priority_speed(monkeypatch):
+    monkeypatch.setenv("MAXCHEAPAI_API_KEY", "mcai_test_key")
+    monkeypatch.delenv("MAXCHEAPAI_SPEED", raising=False)
+
+    service = MaxCheapAIService()
+
+    assert service.speed == "priority"
+
+
 def test_image_request_honors_resolution_and_returns_untouched_bytes(monkeypatch):
     service = configure_service(monkeypatch)
     original_media = b"\xff\xd8\xff\xe1provider-c2pa-image-bytes\xff\xd9"
