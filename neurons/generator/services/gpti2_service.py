@@ -10,7 +10,7 @@ from ..task_manager import GenerationTask
 from .base_service import BaseGenerationService, CheckpointFn
 
 API_BASE = "https://gpti2.store/v1"
-MODEL = "gpt-image-2"
+DEFAULT_MODEL = "gpt-image-2.5-flare"
 CHECKPOINT_KIND_GPTI2 = "gpti2_generation"
 PENDING_STATUSES = {"queued", "running"}
 SIZE_MAP = {
@@ -26,11 +26,12 @@ SIZE_MAP = {
 
 
 class GPTi2Service(BaseGenerationService):
-    """GPT Image 2 generation through GPTi2's OpenAI-compatible API."""
+    """GPT Image generation through GPTi2's OpenAI-compatible API."""
 
     def __init__(self, config: Any = None):
         super().__init__(config)
         self.api_key = os.getenv("GPTI2_API_KEY", "").strip()
+        self.model = os.getenv("GPTI2_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
         self.base_url = os.getenv("GPTI2_API_BASE_URL", API_BASE).rstrip("/")
         self.request_timeout = float(os.getenv("GPTI2_REQUEST_TIMEOUT", "1800"))
         self.poll_interval = float(os.getenv("GPTI2_POLL_INTERVAL", "5"))
@@ -47,7 +48,7 @@ class GPTi2Service(BaseGenerationService):
         return {"image": ["image_generation"], "video": []}
 
     def get_api_key_requirements(self) -> Dict[str, str]:
-        return {"GPTI2_API_KEY": "GPTi2 API key for GPT Image 2 generation"}
+        return {"GPTI2_API_KEY": "GPTi2 API key for GPT Image generation"}
 
     def process(self, task: GenerationTask) -> Dict[str, Any]:
         return self.process_with_checkpoint(task)
@@ -70,8 +71,7 @@ class GPTi2Service(BaseGenerationService):
             return self._generate_job(task, payload, checkpoint_callback)
         return self._generate_sync(task, payload)
 
-    @staticmethod
-    def _build_payload(task: GenerationTask) -> Dict[str, Any]:
+    def _build_payload(self, task: GenerationTask) -> Dict[str, Any]:
         parameters = task.parameters or {}
         resolution = str(parameters.get("resolution", "1K")).upper()
         if resolution not in {"1K", "2K", "4K"}:
@@ -88,7 +88,7 @@ class GPTi2Service(BaseGenerationService):
         if background not in {"transparent", "opaque", "auto"}:
             background = "opaque"
         return {
-            "model": MODEL,
+            "model": self.model,
             "prompt": task.prompt,
             "size": SIZE_MAP[aspect_ratio][resolution],
             "quality": quality,
@@ -229,8 +229,8 @@ class GPTi2Service(BaseGenerationService):
     def _auth_headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
-    @staticmethod
     def _result(
+        self,
         media: bytes,
         size: str,
         quality: str,
@@ -238,7 +238,7 @@ class GPTi2Service(BaseGenerationService):
         job_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         metadata = {
-            "model": MODEL,
+            "model": self.model,
             "provider": "gpti2",
             "mime_type": mime_type,
             "size": size,

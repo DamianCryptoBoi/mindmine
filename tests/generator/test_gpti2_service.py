@@ -34,11 +34,15 @@ def make_task(parameters=None, checkpoint=None):
     )
 
 
-def configure_service(monkeypatch):
+def configure_service(monkeypatch, model=None):
     from neurons.generator.services.gpti2_service import GPTi2Service
 
     monkeypatch.setenv("GPTI2_API_KEY", "sk-gpti2-test")
     monkeypatch.setenv("GPTI2_POLL_INTERVAL", "0")
+    if model is None:
+        monkeypatch.delenv("GPTI2_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("GPTI2_MODEL", model)
     return GPTi2Service()
 
 
@@ -73,7 +77,7 @@ def test_sync_generation_maps_sn34_request_and_decodes_original_bytes(monkeypatc
 
     assert result["data"] == media
     assert result["metadata"] == {
-        "model": "gpt-image-2",
+        "model": "gpt-image-2.5-flare",
         "provider": "gpti2",
         "mime_type": "image/png",
         "size": "2400x1600",
@@ -88,7 +92,7 @@ def test_sync_generation_maps_sn34_request_and_decodes_original_bytes(monkeypatc
                 "Idempotency-Key": "task-gpti2-123",
             },
             {
-                "model": "gpt-image-2",
+                "model": "gpt-image-2.5-flare",
                 "prompt": "A red fox running through fresh snow",
                 "size": "2400x1600",
                 "quality": "medium",
@@ -98,6 +102,28 @@ def test_sync_generation_maps_sn34_request_and_decodes_original_bytes(monkeypatc
             1800.0,
         )
     ]
+
+
+def test_model_env_overrides_default_in_request_and_metadata(monkeypatch):
+    service = configure_service(monkeypatch, model="gpt-image-custom")
+    submitted = []
+
+    monkeypatch.setattr(
+        "requests.post",
+        lambda url, headers, json, timeout: submitted.append(json)
+        or FakeResponse(
+            payload={
+                "data": [{"b64_json": base64.b64encode(b"png").decode()}],
+                "size": "1024x1024",
+                "quality": "low",
+            }
+        ),
+    )
+
+    result = service.process(make_task())
+
+    assert submitted[0]["model"] == "gpt-image-custom"
+    assert result["metadata"]["model"] == "gpt-image-custom"
 
 
 @pytest.mark.parametrize(

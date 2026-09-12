@@ -48,7 +48,7 @@ class ServiceRegistry:
       - ckey: Nano Banana Pro images with Nano Banana 2 fallback (requires CKEY_API_KEY)
       - vertexai: Nano Banana Pro images through Vertex AI (uses Google ADC)
       - vertexgen: Nano Banana Pro images through VertexGen (requires VERTEXGEN_API_KEY)
-      - gpti2: GPT Image 2 images through GPTi2 (requires GPTI2_API_KEY)
+      - gpti2: GPT Image generation through GPTi2 (requires GPTI2_API_KEY)
       - none: Disable this modality (requests will be rejected)
 
     If not set, falls back to loading all available services.
