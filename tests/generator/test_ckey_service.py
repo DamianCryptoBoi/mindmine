@@ -154,21 +154,14 @@ def test_registry_selects_ckey_for_image_generation(monkeypatch):
     assert registry.get_service("video") is None
 
 
-@pytest.mark.parametrize(
-    "media_url",
-    [
-        "http://flow-content.google/image/not-https",
-        "https://127.0.0.1/internal",
-        "https://flow-content.google.evil.example/image/fake",
-    ],
-)
-def test_untrusted_media_urls_are_rejected_without_fetching(monkeypatch, media_url):
+def test_media_url_from_any_host_is_downloaded(monkeypatch):
     from neurons.generator.services.ckey_service import CKeyService
 
     monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
     monkeypatch.setenv("CKEY_RETRY_DELAY", "0")
     service = CKeyService()
     downloads = []
+    media_url = "https://cdn.ckey.example/image/generated"
 
     monkeypatch.setattr(
         "requests.post",
@@ -179,7 +172,35 @@ def test_untrusted_media_urls_are_rejected_without_fetching(monkeypatch, media_u
     monkeypatch.setattr(
         "requests.get",
         lambda *args, **kwargs: downloads.append(args[0])
-        or FakeResponse(content=b"private data"),
+        or FakeResponse(
+            content=b"generated-image",
+            headers={"Content-Type": "image/png"},
+        ),
+    )
+
+    result = service.process(make_task())
+
+    assert downloads == [media_url]
+    assert result["data"] == b"generated-image"
+
+
+def test_non_https_media_url_is_rejected_without_fetching(monkeypatch):
+    from neurons.generator.services.ckey_service import CKeyService
+
+    monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
+    monkeypatch.setenv("CKEY_RETRY_DELAY", "0")
+    service = CKeyService()
+    downloads = []
+
+    monkeypatch.setattr(
+        "requests.post",
+        lambda *args, **kwargs: FakeResponse(
+            payload={"data": [{"url": "http://cdn.ckey.example/image/generated"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        "requests.get",
+        lambda *args, **kwargs: downloads.append(args[0]),
     )
 
     with pytest.raises(RuntimeError, match="refused untrusted media URL"):

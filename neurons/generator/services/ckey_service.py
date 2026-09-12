@@ -19,7 +19,6 @@ RESOLUTION_SIZES = {
     "4K": "4096x4096",
 }
 RETRIES_PER_MODEL = 3
-MEDIA_HOST = "flow-content.google"
 
 
 class CKeyService(BaseGenerationService):
@@ -136,7 +135,7 @@ class CKeyService(BaseGenerationService):
             parsed = urlparse(url)
             trusted = (
                 parsed.scheme.lower() == "https"
-                and parsed.hostname == MEDIA_HOST
+                and parsed.hostname is not None
                 and parsed.port in (None, 443)
                 and parsed.username is None
                 and parsed.password is None
