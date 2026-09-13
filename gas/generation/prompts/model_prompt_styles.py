@@ -118,7 +118,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,  # Benefits from quality tags
         supports_composition=True,
         negative_prompt=True,
-        negative_base="low quality, blurry, bad anatomy, watermark, text, logo, signature, cropped, worst quality, jpeg artifacts",
+        negative_base="bad anatomy, watermark, signature",
         optimal_length=(30, 77),  # CLIP token limit consideration
         modifier_intensity="rich",
         preferred_modifier_categories=["style", "lighting", "camera", "quality_tags", "mood", "color_palette"],
@@ -129,7 +129,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=True,
         negative_prompt=True,
-        negative_base="low quality, blurry, bad anatomy, watermark, text, logo, signature, cropped, worst quality, jpeg artifacts",
+        negative_base="bad anatomy, watermark, signature",
         optimal_length=(30, 77),
         modifier_intensity="rich",
         preferred_modifier_categories=["style", "lighting", "camera", "quality_tags", "mood", "color_palette"],
@@ -140,7 +140,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=True,
         negative_prompt=True,
-        negative_base="cartoon, anime, illustration, painting, drawing, low quality, blurry, bad anatomy",
+        negative_base="bad anatomy",
         optimal_length=(30, 77),
         modifier_intensity="rich",
         preferred_modifier_categories=["technical", "camera", "lighting", "quality_tags"],
@@ -154,7 +154,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=False,  # Less capable at composition
         negative_prompt=True,
-        negative_base="low quality, blurry, bad anatomy, watermark, text",
+        negative_base="bad anatomy, watermark",
         optimal_length=(20, 77),
         modifier_intensity="moderate",
         preferred_modifier_categories=["style", "lighting", "quality_tags"],
@@ -165,8 +165,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=False,
         negative_prompt=True,
-        prefix="mdjrny-v4 style",  # Model-specific trigger
-        negative_base="low quality, blurry, bad anatomy",
+        negative_base="bad anatomy",
         optimal_length=(20, 60),
         modifier_intensity="moderate",
         preferred_modifier_categories=["art_movement", "style", "mood"],
@@ -177,7 +176,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=False,
         negative_prompt=True,
-        negative_base="low quality, worst quality, bad anatomy, bad hands",
+        negative_base="bad anatomy, bad hands",
         optimal_length=(20, 77),
         modifier_intensity="moderate",
         preferred_modifier_categories=["style", "mood", "color_palette"],
@@ -230,7 +229,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=True,
         negative_prompt=True,
-        negative_base="blurry, low quality, bad anatomy, watermark",
+        negative_base="bad anatomy, watermark",
         optimal_length=(50, 150),
         modifier_intensity="moderate",
         preferred_modifier_categories=["style", "lighting", "quality_tags"],
@@ -325,7 +324,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         motion_emphasis=True,
         camera_motion=False,  # Limited camera control
         temporal_descriptors=True,
-        negative_base="low quality, blurry, bad anatomy, static, no motion",
+        negative_base="bad anatomy",
         optimal_length=(30, 77),
         modifier_intensity="moderate",
         preferred_modifier_categories=["style", "mood", "quality_tags"],
@@ -365,7 +364,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=True,
         negative_prompt=True,
-        negative_base="blurry, low quality, bad blending, visible seam, artifact",
+        negative_base="bad blending, visible seam, artifact",
         optimal_length=(30, 77),
         modifier_intensity="minimal",
         preferred_modifier_categories=["style", "lighting"],
@@ -376,7 +375,7 @@ MODEL_STYLES: Dict[str, ModelPromptConfig] = {
         quality_tags=True,
         supports_composition=True,
         negative_prompt=True,
-        negative_base="blurry, low quality, bad anatomy, watermark",
+        negative_base="bad anatomy, watermark",
         optimal_length=(30, 77),
         modifier_intensity="moderate",
         preferred_modifier_categories=["style", "lighting", "mood", "quality_tags"],
@@ -450,6 +449,11 @@ class AdaptedPrompt:
 
     prompt: str
     negative_prompt: Optional[str] = None
+
+
+_REALISM_PREFIX = (
+    "photorealistic, ordinary real-world capture, plausible imperfections"
+)
 
 
 def _scene_kind_for_negatives(scene: SceneDescription) -> str:
@@ -526,10 +530,12 @@ def adapt_for_local_model(
     rng = rng or random.Random()
     config = get_model_config(model_name)
 
-    out = prompt.strip()
+    out = _REALISM_PREFIX
 
     if config.prefix:
-        out = f"{config.prefix}, {out}"
+        out = f"{out}, {config.prefix}"
+
+    out = f"{out}, {prompt.strip()}"
 
     suffix_pieces: List[str] = []
     quality = _maybe_quality_suffix(config, rng)

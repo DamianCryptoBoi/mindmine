@@ -44,7 +44,6 @@ _META_PATTERNS = (
 
 _STRUCTURE_RE = re.compile(r"(^|\n)\s*([-*•]\s|\d+\.\s|#+\s)")
 
-
 def validate(text: str, spec: Optional[PromptSpec]) -> Tuple[bool, str]:
     """Validate a composed prompt against its committed spec.
 
@@ -71,23 +70,23 @@ def validate(text: str, spec: Optional[PromptSpec]) -> Tuple[bool, str]:
     if spec is None:
         return True, ""
 
-    words = len(re.findall(r"\S+", text))
+    word_count = len(re.findall(r"\S+", text))
     lo, hi = spec.length_words
     min_ok = int(lo * (1 - _BAND_TOLERANCE))
     max_ok = int(hi * (1 + _BAND_TOLERANCE))
-    if words < min_ok or words > max_ok:
+    if word_count < min_ok or word_count > max_ok:
         return False, (
-            f"length {words} words outside committed band "
+            f"length {word_count} words outside committed band "
             f"{lo}-{hi} (tolerance {min_ok}-{max_ok})"
         )
 
     if spec.style_strictness == "plain" and spec.banned_phrases:
-        words = _tokens(text)
+        tokens = _tokens(text)
         for phrase in spec.banned_phrases:
             phrase_tokens = _tokens(phrase)
             plen = len(phrase_tokens)
-            for i in range(len(words) - plen + 1):
-                if words[i : i + plen] == phrase_tokens:
+            for i in range(len(tokens) - plen + 1):
+                if tokens[i : i + plen] == phrase_tokens:
                     return False, f"banned phrase for plain register: {phrase!r}"
 
     return True, ""

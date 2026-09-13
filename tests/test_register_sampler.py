@@ -54,6 +54,37 @@ def test_plain_registers_have_banned_phrases():
     assert all(s.banned_phrases for s in plains)
 
 
+def test_sampler_excludes_polished_and_animated_registers():
+    specs = [
+        sample_spec(modality=modality, rng_seed=seed)
+        for modality in ("image", "video")
+        for seed in range(500)
+    ]
+
+    assert {spec.register for spec in specs}.isdisjoint(
+        {"cinema_polished", "animation_3d"}
+    )
+
+
+def test_sampler_keeps_other_real_world_registers():
+    specs = [sample_spec(modality="video", rng_seed=seed) for seed in range(1000)]
+
+    assert {
+        "cctv_surveillance",
+        "dashcam",
+        "documentary",
+        "drone_aerial",
+        "news_broadcast",
+        "screen_recording",
+        "webcam_stream",
+    }.issubset({spec.register for spec in specs})
+
+    image_specs = [
+        sample_spec(modality="image", rng_seed=seed) for seed in range(1000)
+    ]
+    assert "dashcam" in {spec.register for spec in image_specs}
+
+
 def test_weights_override():
     specs = [
         sample_spec(

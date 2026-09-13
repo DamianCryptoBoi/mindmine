@@ -91,22 +91,39 @@ _VIDEO_SYSTEM = (
     "and event count are already decided; your job is only to realize them "
     "vividly and plausibly for THIS scene.\n\n"
     "Your job: imagine the scene as a 5-10 second video clip and write "
-    "a SINGLE fluent paragraph describing that clip. Match the visual "
-    "register implied by the source — that might be a casual phone "
+    "a SINGLE fluent paragraph describing that clip. Realize the subject "
+    "through the committed capture register when present; otherwise choose "
+    "a fitting real-world register — that might be a casual phone "
     "clip, a surveillance frame, a documentary observation, a home "
-    "video, a screen recording, an animation, a press capture, an "
-    "editorial shot, polished narrative cinema, or many other "
-    "possibilities. Do not always default to polished cinematography.\n\n"
+    "video, a screen recording, a press capture, an on-location news "
+    "clip, a webcam stream, dashcam footage, or a "
+    "consumer drone recording. Every result must look photorealistic, "
+    "ordinary, and captured by a real person or real-world device rather "
+    "than staged, rendered, or professionally polished.\n\n"
     "REQUIREMENTS\n"
     "- Present tense, one paragraph, no line breaks. Respect the length "
     "given in the shot spec (or the user turn).\n"
     "- Make the scene visually concrete: subject + action, setting, "
     "what is moving, lighting and atmosphere. Include framing, camera "
     "behavior, lens, depth of field, color palette, or pacing only "
-    "when they fit the register — a snapshot or surveillance frame "
-    "may have an untreated static camera and no notion of 'lens'; a "
-    "polished shot may have explicit framing, movement, and lens "
-    "choices. Choose what genuinely fits THIS scene.\n"
+    "when they fit the register — a phone clip or surveillance frame "
+    "may have an untreated camera and no notion of 'lens', while a "
+    "tripod or drone capture may use explicit framing and movement. "
+    "Choose what genuinely fits THIS scene.\n"
+    "- Preserve believable capture flaws instead of beautifying the shot. "
+    "For phone and home-video registers, describe an amateur iPhone clip "
+    "with uneven framing and a plausible mix of slight focus error, motion "
+    "blur, handheld micro-shake, auto-exposure or white-balance shifts, "
+    "sensor noise, compression, clipped highlights, or a faint lens smudge. "
+    "For other registers, use the equivalent flaws of that actual device. "
+    "Choose only the few flaws justified by the scene; do not turn them into "
+    "a uniform filter or a checklist.\n"
+    "- Keep faces, hands, objects, textures, and backgrounds naturally "
+    "asymmetric and temporally consistent. Motion has ordinary weight and "
+    "inertia; autofocus, exposure, and handheld movement react imperfectly "
+    "when the scene warrants it.\n"
+    "- Begin with the capture register and one to three scene-appropriate "
+    "imperfections before describing the action.\n"
     "- Ground subject motion in what plausibly moves: prefer the "
     "scene's `dynamic_candidates` and `observed_motion_cues`. Do not "
     "invent subjects or actions that aren't implied by the scene.\n"
@@ -133,19 +150,33 @@ _IMAGE_SYSTEM = (
     "when present it is authoritative — register, length, and style "
     "constraints are already decided; realize them for THIS scene.\n\n"
     "Your job: rewrite the scene as a SINGLE dense natural-language "
-    "image prompt with maximum visual specificity. Match the visual "
-    "register implied by the source — that might be a casual snapshot, "
+    "image prompt with maximum visual specificity. Realize the subject "
+    "through the committed capture register when present; otherwise choose "
+    "a fitting real-world register — that might be a casual snapshot, "
     "a surveillance still, a press photo, a screen capture, an "
-    "illustration or painting, a polished editorial frame, or many "
-    "other possibilities. Do not always default to polished editorial "
-    "photography.\n\n"
+    "on-location news still, a webcam frame, dashcam image, documentary "
+    "photo, or consumer drone frame. Every result must look photorealistic, "
+    "ordinary, and captured by a real person or real-world device rather "
+    "than staged, rendered, or professionally polished.\n\n"
     "REQUIREMENTS\n"
     "- One paragraph, no line breaks. Respect the length given in the "
     "shot spec (or the user turn).\n"
-    "- Lead with the most salient element for THIS scene; vary the "
+    "- Lead with the capture register, one to three scene-appropriate "
+    "imperfections, and the most salient element for THIS scene. Vary the "
     "structure across calls. Include framing, lens, color palette, "
     "lighting, mood, composition, or style/medium only when they fit "
-    "the register implied by the source.\n"
+    "the committed or chosen real-world register.\n"
+    "- Preserve believable capture flaws instead of beautifying the image. "
+    "For phone and home-video registers, describe an amateur iPhone photo "
+    "with uneven framing and a plausible mix of slight focus error, motion "
+    "blur, auto-exposure or white-balance shifts, sensor noise, compression, "
+    "clipped highlights, or a faint lens smudge. For other registers, use "
+    "the equivalent flaws of that actual device. Choose only the few flaws "
+    "justified by the scene; do not turn them into a uniform filter or a "
+    "checklist.\n"
+    "- Keep faces, hands, objects, materials, wear, clutter, and backgrounds "
+    "naturally asymmetric and physically coherent. Retain ordinary skin and "
+    "surface texture rather than retouching or idealizing it.\n"
     "- Use specific visual nouns: 'storm clouds gathering above the "
     "ridge', not 'moody sky'; 'rim light from a north-facing window', "
     "not 'soft light'.\n"
@@ -572,9 +603,11 @@ class PromptGenerator:
         supersedes `length_spec`.
         """
         scene_dict = asdict(scene)
-        # Drop the dense caption from the JSON since we surface it
-        # explicitly below; keeps the JSON focused on structured facts.
+        # Surface the caption separately and omit the source style so a
+        # rendered/studio reference cannot override the real-world capture
+        # treatment chosen for the output.
         caption = scene_dict.pop("caption", "")
+        scene_dict.pop("style", None)
         scene_json = json.dumps(scene_dict, indent=2, ensure_ascii=False)
 
         parts: List[str] = []
@@ -643,6 +676,19 @@ class PromptGenerator:
                 "",
                 history,
             ]
+
+        parts += [
+            "",
+            "REALISM OVERRIDE (authoritative): Source medium, style, lighting, "
+            "and production labels are reference observations only. Preserve "
+            "the subject, action, setting, palette, and physical light cues, "
+            "but translate cinematic, studio, editorial, illustrated, painted, "
+            "animated, rendered, or CGI treatment into the selected ordinary "
+            "photorealistic real-device capture. The final prompt must describe "
+            "only that real-world treatment. Begin the final prompt with the "
+            "selected capture register and 1-3 scene-appropriate imperfections "
+            "so they survive short local-model context limits.",
+        ]
 
         if spec is not None:
             lo, hi = spec.length_words

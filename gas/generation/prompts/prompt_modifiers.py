@@ -21,26 +21,21 @@ from typing import Dict, List
 
 MODIFIERS: Dict[str, List[str]] = {
     "quality_tags": [
-        "masterpiece", "best quality", "high quality", "ultra quality",
-        "highly detailed", "intricate details", "fine details",
-        "professional photography", "award-winning", "featured on 500px",
-        "trending on artstation", "8K wallpaper", "stunning",
+        "photorealistic", "natural texture", "ordinary color response",
+        "unretouched detail", "subtle compression", "plausible imperfections",
+        "physically coherent detail", "natural asymmetry",
     ],
     "negative_portrait": [
         "bad anatomy", "wrong anatomy", "extra limbs", "missing limbs",
         "mutated hands", "extra fingers", "missing fingers", "fused fingers",
-        "deformed face", "ugly face", "asymmetric face",
+        "deformed face",
         "crossed eyes", "dead eyes", "uncanny valley",
         "bad proportions", "long neck", "long body",
     ],
     "negative_landscape": [
-        "oversaturated", "unrealistic colors", "bad composition",
-        "cluttered", "messy", "chaotic", "unbalanced",
-        "artificial looking", "fake", "cgi obvious",
+        "unrealistic colors", "artificial looking", "fake", "cgi obvious",
     ],
     "negative_video": [
-        "flickering", "temporal inconsistency", "frame jumping",
-        "motion blur artifacts", "ghosting", "tearing",
-        "stuttering", "jerky motion", "unnatural movement",
+        "temporal inconsistency", "unnatural movement",
     ],
 }

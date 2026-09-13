@@ -42,44 +42,46 @@ class Register:
 REGISTERS: Tuple[Register, ...] = (
     Register(
         "phone_casual", 0.20,
-        "casual phone capture; imperfect framing, slight tilt, ordinary "
-        "lighting, plain colloquial description",
+        "amateur iPhone capture; imperfect framing, slight tilt, ordinary "
+        "available light, mild focus or motion blur when plausible, plain "
+        "colloquial description",
         ("handheld drift", "slow pan", "walking motion", "static handheld"),
         strictness="plain",
     ),
     Register(
         "phone_vertical", 0.10,
-        "vertical phone video; held at arm's length or chest height, "
-        "everyday context, plain language",
+        "vertical amateur iPhone capture; held at arm's length or chest "
+        "height, uneven framing, everyday context, plain language",
         ("handheld drift", "walking motion", "static handheld"),
         strictness="plain",
     ),
     Register(
         "cctv_surveillance", 0.08,
         "fixed security camera; high mounted angle, wide coverage, flat "
-        "utilitarian color, no artistic treatment, plain factual language",
+        "utilitarian color, modest sensor noise and compression, plain "
+        "factual language",
         ("static",),
         strictness="plain",
     ),
     Register(
         "dashcam", 0.05,
         "dashboard camera; wide lens, hood or dashboard edge visible, "
-        "scene moves past the fixed mount, plain factual language",
+        "windshield reflections and compression, scene moves past the fixed "
+        "mount, plain factual language",
         ("fixed mount, scene moves past",),
         strictness="plain",
-        image_ok=False,
     ),
     Register(
         "home_video", 0.07,
-        "home video; amateur operator, occasional zoom or reframe, warm "
-        "domestic context, plain language",
+        "amateur iPhone home video; occasional focus miss, zoom or reframe, "
+        "warm domestic context, plain language",
         ("shaky handheld", "amateur zoom", "reframing pans"),
         strictness="plain",
     ),
     Register(
         "news_broadcast", 0.07,
-        "broadcast news; tripod mid-shot or standup framing, even "
-        "professional lighting, correspondent or b-roll register",
+        "broadcast news; on-location tripod mid-shot, standup, or b-roll "
+        "framing, practical available light, broadcast compression",
         ("static tripod", "slow pan", "slow zoom"),
     ),
     Register(
@@ -90,8 +92,9 @@ REGISTERS: Tuple[Register, ...] = (
     ),
     Register(
         "drone_aerial", 0.05,
-        "aerial drone; high vantage, gliding movement, wide landscape "
-        "or overhead geometry",
+        "consumer aerial drone; high vantage, gliding movement, mild video "
+        "compression and auto-exposure shifts, wide landscape or overhead "
+        "geometry",
         ("gliding forward", "slow orbit", "rising reveal", "static hover"),
     ),
     Register(
@@ -102,24 +105,11 @@ REGISTERS: Tuple[Register, ...] = (
         strictness="plain",
     ),
     Register(
-        "animation_3d", 0.05,
-        "3D rendered animation; stylized materials and lighting, "
-        "deliberate camera",
-        ("smooth dolly", "orbit", "static", "push-in"),
-    ),
-    Register(
         "webcam_stream", 0.06,
         "webcam or stream capture; fixed near framing, compressed look, "
-        "desk or room context, plain language",
+        "auto white balance, ordinary desk or room context, plain language",
         ("static",),
         strictness="plain",
-    ),
-    Register(
-        "cinema_polished", 0.15,
-        "polished narrative cinematography; full control of lens, light, "
-        "and movement; cinematographic vocabulary appropriate",
-        ("static tripod", "slow push-in", "dolly", "tracking", "crane",
-         "handheld vérité"),
     ),
 )
 

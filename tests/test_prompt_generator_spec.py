@@ -71,3 +71,27 @@ def test_plausible_events_listed_when_present():
     assert spec is not None
     msg = PromptGenerator._build_user_message(scene, deque(), "", spec=spec)
     assert "a courier knocks" in msg
+
+
+def test_source_style_does_not_override_photoreal_capture():
+    scene = _scene()
+    scene.style = "3D render"
+
+    msg = PromptGenerator._build_user_message(scene, deque(), "100-180 words")
+
+    assert "3D render" not in msg
+
+
+def test_source_treatment_is_overridden_after_scene_facts():
+    scene = _scene()
+    scene.caption = "A polished 3D animation of a man at a desk."
+    scene.lighting = "professional studio lighting"
+
+    msg = PromptGenerator._build_user_message(scene, deque(), "100-180 words")
+
+    override = "REALISM OVERRIDE (authoritative)"
+    assert scene.caption in msg
+    assert scene.lighting in msg
+    assert override in msg
+    assert msg.index(scene.caption) < msg.index(override)
+    assert "Begin the final prompt with the selected capture register" in msg

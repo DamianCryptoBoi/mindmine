@@ -57,6 +57,20 @@ def test_rejects_out_of_band_length():
     assert not ok and "length" in reason
 
 
+def test_allows_nonphotoreal_words_as_real_subject_matter():
+    spec = _free_spec()
+    lo, _ = spec.length_words
+
+    for subject in (
+        "a phone screen showing an animation settings panel",
+        "a reporter discussing CGI in a television interview",
+        "a museum visitor looking at a computer-generated image",
+    ):
+        text = f"A shaky phone video frames {subject}. " + _words(lo)
+        ok, reason = validate(text, spec)
+        assert ok, reason
+
+
 def test_band_tolerance():
     spec = _free_spec()
     lo, hi = spec.length_words
