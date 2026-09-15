@@ -36,7 +36,11 @@ def _fake_project(tmp_path: Path, env_contents: str) -> tuple[Path, dict[str, st
         bin_dir / "pm2",
         "#!/bin/bash\n"
         'printf "%s\\n" "$GEN_MINER_ENV_FILE" >> "$PM2_TEST_LOG"\n'
-        'printf "%s\\n" "$*" >> "$PM2_TEST_LOG"\n',
+        'printf "%s\\n" "$*" >> "$PM2_TEST_LOG"\n'
+        'hotkey="${GEN_MINER_ENV_FILE#.env.}"\n'
+        'if [[ "$1" == start && "${PM2_TEST_EXISTING:-}" == "$hotkey" ]]; then\n'
+        "  exit 1\n"
+        "fi\n",
     )
 
     env = os.environ.copy()
@@ -118,7 +122,7 @@ def test_creates_isolated_hotkey_env_and_starts_exact_pm2_config(tmp_path):
 
     assert command_log.read_text().splitlines() == [
         ".env.hotkey-7",
-        "start gen_miner.config.js",
+        "startOrRestart gen_miner.config.js",
     ]
 
 
@@ -154,47 +158,80 @@ def test_creates_multiple_hotkeys_with_the_same_chosen_settings(tmp_path):
 
     assert command_log.read_text().splitlines() == [
         ".env.hotkey-7",
-        "start gen_miner.config.js",
+        "startOrRestart gen_miner.config.js",
         ".env.hotkey-8",
-        "start gen_miner.config.js",
+        "startOrRestart gen_miner.config.js",
     ]
 
 
-def test_refuses_to_overwrite_an_existing_hotkey_env(tmp_path):
+def test_overwrites_an_existing_hotkey_env_but_preserves_its_port(tmp_path):
     project_dir, env, command_log = _fake_project(
         tmp_path, "MAXCHEAPAI_API_KEY=maxcheap-test-secret\n"
     )
     existing = project_dir / ".env.hotkey-7"
-    existing.write_text("keep me\n")
+    existing.write_text(
+        "BT_AXON_PORT=8123\n"
+        "BT_WALLET_NAME=old-wallet\n"
+        "OBSOLETE_SETTING=remove-me\n"
+    )
+    env["PM2_TEST_EXISTING"] = "hotkey-7"
 
-    result = _run_setup(project_dir, env, "cold-wallet\nhotkey-7\n")
+    result = _run_setup(project_dir, env, "cold-wallet\nhotkey-7\n1\n1\n")
 
-    assert result.returncode != 0
-    assert "already exists" in result.stderr
-    assert existing.read_text() == "keep me\n"
-    assert not command_log.exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated, _ = _read_env(existing)
+    assert generated["BT_AXON_PORT"] == "8123"
+    assert generated["BT_WALLET_NAME"] == "cold-wallet"
+    assert generated["BT_WALLET_HOTKEY"] == "hotkey-7"
+    assert generated["IMAGE_SERVICE"] == "maxcheapai"
+    assert generated["VIDEO_SERVICE"] == "maxcheapai"
+    assert generated["MAXCHEAPAI_API_KEY"] == "maxcheap-test-secret"
+    assert "OBSOLETE_SETTING" not in generated
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o600
+    assert command_log.read_text().splitlines() == [
+        ".env.hotkey-7",
+        "startOrRestart gen_miner.config.js",
+    ]
 
 
-def test_batch_preflight_rejects_a_later_dangling_symlink_before_creating_anything(
-    tmp_path,
-):
+def test_overwrite_replaces_an_invalid_existing_port(tmp_path):
+    project_dir, env, _ = _fake_project(
+        tmp_path, "MAXCHEAPAI_API_KEY=maxcheap-test-secret\n"
+    )
+    existing = project_dir / ".env.hotkey-7"
+    existing.write_text("BT_AXON_PORT=not-a-port\n")
+
+    result = _run_setup(project_dir, env, "cold-wallet\nhotkey-7\n1\n1\n")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated, _ = _read_env(existing)
+    assert generated["BT_AXON_PORT"] != "not-a-port"
+    assert 8000 <= int(generated["BT_AXON_PORT"]) <= 9000
+
+
+def test_overwrite_replaces_a_dangling_symlink_without_following_it(tmp_path):
     project_dir, env, command_log = _fake_project(
         tmp_path, "MAXCHEAPAI_API_KEY=maxcheap-test-secret\n"
     )
     occupied = project_dir / ".env.hotkey-8"
-    occupied.symlink_to(project_dir / "missing-env")
+    symlink_target = project_dir / "missing-env"
+    occupied.symlink_to(symlink_target)
 
     result = _run_setup(
         project_dir,
         env,
-        "cold-wallet\nhotkey-7 hotkey-8\n1\n1\n",
+        "cold-wallet\nhotkey-8\n1\n1\n",
     )
 
-    assert result.returncode != 0
-    assert ".env.hotkey-8 already exists" in result.stderr
-    assert not (project_dir / ".env.hotkey-7").exists()
-    assert occupied.is_symlink()
-    assert not command_log.exists()
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated, _ = _read_env(occupied)
+    assert not occupied.is_symlink()
+    assert not symlink_target.exists()
+    assert 8000 <= int(generated["BT_AXON_PORT"]) <= 9000
+    assert command_log.read_text().splitlines() == [
+        ".env.hotkey-8",
+        "startOrRestart gen_miner.config.js",
+    ]
 
 
 def test_requires_at_least_one_keyed_generation_service(tmp_path):

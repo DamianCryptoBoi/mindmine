@@ -25,6 +25,7 @@ trim() {
 
 read_env_rhs() {
     local wanted="$1"
+    local env_path="${2:-$SOURCE_ENV}"
     local line key found=""
 
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -39,14 +40,14 @@ read_env_rhs() {
         key="$(trim "${line%%=*}")"
         [[ "$key" == "$wanted" ]] || continue
         found="${line#*=}"
-    done < "$SOURCE_ENV"
+    done < "$env_path"
 
     printf '%s' "$found"
 }
 
 read_env_value() {
     local value
-    value="$(trim "$(read_env_rhs "$1")")"
+    value="$(trim "$(read_env_rhs "$1" "${2:-$SOURCE_ENV}")")"
     if [[ "${value:0:1}" == '"' ]]; then
         value="${value:1}"
         value="${value%%\"*}"
@@ -59,6 +60,11 @@ read_env_value() {
         value="${BASH_REMATCH[1]}"
     fi
     trim "$value"
+}
+
+is_valid_tcp_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    ((10#$1 >= 1 && 10#$1 <= 65535))
 }
 
 service_label() {
@@ -193,12 +199,19 @@ read -r -a hotkeys || fail "No hotkeys were provided."
 [[ "$wallet_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Wallet name may contain only letters, numbers, dots, underscores, and hyphens."
 [[ ${#hotkeys[@]} -gt 0 ]] || fail "No hotkeys were provided."
 validated_hotkeys=()
+preserved_axon_ports=()
 for hotkey in "${hotkeys[@]}"; do
     [[ "$hotkey" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Hotkey may contain only letters, numbers, dots, underscores, and hyphens."
     ! contains_key "$hotkey" "${validated_hotkeys[@]-}" || fail "Duplicate hotkey: $hotkey."
     validated_hotkeys+=("$hotkey")
     env_file=".env.$hotkey"
-    [[ ! -e "$PROJECT_DIRECTORY/$env_file" && ! -L "$PROJECT_DIRECTORY/$env_file" ]] || fail "$env_file already exists; refusing to overwrite it."
+    target_path="$PROJECT_DIRECTORY/$env_file"
+    existing_port=""
+    if [[ -f "$target_path" && ! -L "$target_path" ]]; then
+        existing_port="$(read_env_value BT_AXON_PORT "$target_path")"
+        is_valid_tcp_port "$existing_port" || existing_port=""
+    fi
+    preserved_axon_ports+=("$existing_port")
 done
 
 image_options=()
@@ -289,9 +302,16 @@ cleanup() {
 trap cleanup EXIT
 
 axon_ports=()
+for existing_port in "${preserved_axon_ports[@]}"; do
+    [[ -z "$existing_port" ]] || axon_ports+=("$existing_port")
+done
+hotkey_index=0
 for hotkey in "${hotkeys[@]}"; do
-    axon_port="$(find_unused_axon_port "${axon_ports[@]-}")" || fail "Could not find an unused TCP port from 8000 through 9000."
-    axon_ports+=("$axon_port")
+    axon_port="${preserved_axon_ports[$hotkey_index]}"
+    if [[ -z "$axon_port" ]]; then
+        axon_port="$(find_unused_axon_port "${axon_ports[@]-}")" || fail "Could not find an unused TCP port from 8000 through 9000."
+        axon_ports+=("$axon_port")
+    fi
     env_file=".env.$hotkey"
     target_path="$PROJECT_DIRECTORY/$env_file"
     temp_path="$(mktemp "$PROJECT_DIRECTORY/.env.$hotkey.tmp.XXXXXX")"
@@ -319,14 +339,20 @@ for hotkey in "${hotkeys[@]}"; do
     done
 
     chmod 600 "$temp_path"
-    if ! ln "$temp_path" "$target_path" 2>/dev/null; then
-        fail "$env_file already exists; refusing to overwrite it."
+    if ! python3 - "$temp_path" "$target_path" <<'PY'
+import os
+import sys
+
+os.replace(sys.argv[1], sys.argv[2])
+PY
+    then
+        fail "Could not replace $env_file."
     fi
-    rm -f -- "$temp_path"
     temp_path=""
 
     info "Created $env_file for wallet $wallet_name and hotkey $hotkey."
-    info "Using external IP $external_ip and unused TCP port $axon_port."
+    info "Using external IP $external_ip and TCP port $axon_port."
     info "Starting PM2 process $hotkey with image=$image_service and video=$video_service."
-    GEN_MINER_ENV_FILE="$env_file" pm2 start gen_miner.config.js
+    GEN_MINER_ENV_FILE="$env_file" pm2 startOrRestart gen_miner.config.js
+    ((hotkey_index += 1))
 done
