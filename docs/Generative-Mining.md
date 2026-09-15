@@ -153,8 +153,8 @@ PR — we're happy to add new providers and trust anchors.
 ### GPTi2 Service
 - **API Key**: `GPTI2_API_KEY`
 - **Modality**: Image
-- **Model**: `GPTI2_MODEL` (default: OpenAI GPT Image 2.5 Flare,
-  `gpt-image-2.5-flare`)
+- **Model**: `GPTI2_MODEL` (default: OpenAI GPT Image 2.5 Sunburst,
+  `gpt-image-2.5-sunburst`)
 - **Resolution mapping**: SN34's requested 1K/2K/4K tier and aspect ratio map to
   GPTi2's corresponding supported pixel dimensions. Invalid values fall back to
   square 1K.
@@ -175,7 +175,7 @@ Configure which service handles each modality in your `.env.gen_miner` file:
 IMAGE_SERVICE=gpti2         # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, vertexgen, gpti2, or none
 VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
 GPTI2_API_KEY=sk-your-key
-GPTI2_MODEL=gpt-image-2.5-flare
+GPTI2_MODEL=gpt-image-2.5-sunburst
 MAXCHEAPAI_API_KEY=mcai_your_key
 ```
 
@@ -342,7 +342,7 @@ Your miner exposes these endpoints for validators:
 - `CKEY_REQUEST_TIMEOUT`: CKey synchronous generation timeout (default: 1800 seconds)
 - `CKEY_DOWNLOAD_TIMEOUT`: CKey media download timeout (default: 600 seconds)
 - `CKEY_RETRY_DELAY`: Delay between CKey attempts (default: 10 seconds)
-- `GPTI2_MODEL`: GPTi2 image model (default: `gpt-image-2.5-flare`)
+- `GPTI2_MODEL`: GPTi2 image model (default: `gpt-image-2.5-sunburst`)
 - `VERTEXAI_PROJECT`: Vertex AI Google Cloud project; falls back to
   `GOOGLE_CLOUD_PROJECT`, then the project discovered from ADC
 - `VERTEXAI_LOCATION`: Vertex endpoint location (default: `global`)

@@ -10,7 +10,7 @@ from ..task_manager import GenerationTask
 from .base_service import BaseGenerationService, CheckpointFn
 
 API_BASE = "https://gpti2.store/v1"
-DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
 CHECKPOINT_KIND_GPTI2 = "gpti2_generation"
 PENDING_STATUSES = {"queued", "running"}
 SIZE_MAP = {

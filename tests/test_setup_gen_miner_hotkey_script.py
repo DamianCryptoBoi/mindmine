@@ -35,7 +35,7 @@ def _fake_project(tmp_path: Path, env_contents: str) -> tuple[Path, dict[str, st
     _write_executable(
         bin_dir / "pm2",
         "#!/bin/bash\n"
-        'printf "%s\\n" "$GEN_MINER_ENV_FILE" > "$PM2_TEST_LOG"\n'
+        'printf "%s\\n" "$GEN_MINER_ENV_FILE" >> "$PM2_TEST_LOG"\n'
         'printf "%s\\n" "$*" >> "$PM2_TEST_LOG"\n',
     )
 
@@ -122,6 +122,44 @@ def test_creates_isolated_hotkey_env_and_starts_exact_pm2_config(tmp_path):
     ]
 
 
+def test_creates_multiple_hotkeys_with_the_same_chosen_settings(tmp_path):
+    project_dir, env, command_log = _fake_project(
+        tmp_path,
+        "OPENAI_API_KEY=openai-test-secret\n"
+        "RUNWAYML_API_SECRET=runway-test-secret\n",
+    )
+
+    result = _run_setup(
+        project_dir,
+        env,
+        "cold-wallet\nhotkey-7 hotkey-8\n1\n2\n",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    first, _ = _read_env(project_dir / ".env.hotkey-7")
+    second, _ = _read_env(project_dir / ".env.hotkey-8")
+
+    for generated in (first, second):
+        assert generated["BT_WALLET_NAME"] == "cold-wallet"
+        assert generated["IMAGE_SERVICE"] == "openai"
+        assert generated["VIDEO_SERVICE"] == "runway"
+        assert generated["OPENAI_API_KEY"] == "openai-test-secret"
+        assert generated["RUNWAYML_API_SECRET"] == "runway-test-secret"
+
+    assert first["MINER_PM2_NAME"] == first["BT_WALLET_HOTKEY"] == "hotkey-7"
+    assert second["MINER_PM2_NAME"] == second["BT_WALLET_HOTKEY"] == "hotkey-8"
+    assert first["MINER_STATE_DIR"].endswith("/hotkey-7")
+    assert second["MINER_STATE_DIR"].endswith("/hotkey-8")
+    assert first["BT_AXON_PORT"] != second["BT_AXON_PORT"]
+
+    assert command_log.read_text().splitlines() == [
+        ".env.hotkey-7",
+        "start gen_miner.config.js",
+        ".env.hotkey-8",
+        "start gen_miner.config.js",
+    ]
+
+
 def test_refuses_to_overwrite_an_existing_hotkey_env(tmp_path):
     project_dir, env, command_log = _fake_project(
         tmp_path, "MAXCHEAPAI_API_KEY=maxcheap-test-secret\n"
@@ -134,6 +172,28 @@ def test_refuses_to_overwrite_an_existing_hotkey_env(tmp_path):
     assert result.returncode != 0
     assert "already exists" in result.stderr
     assert existing.read_text() == "keep me\n"
+    assert not command_log.exists()
+
+
+def test_batch_preflight_rejects_a_later_dangling_symlink_before_creating_anything(
+    tmp_path,
+):
+    project_dir, env, command_log = _fake_project(
+        tmp_path, "MAXCHEAPAI_API_KEY=maxcheap-test-secret\n"
+    )
+    occupied = project_dir / ".env.hotkey-8"
+    occupied.symlink_to(project_dir / "missing-env")
+
+    result = _run_setup(
+        project_dir,
+        env,
+        "cold-wallet\nhotkey-7 hotkey-8\n1\n1\n",
+    )
+
+    assert result.returncode != 0
+    assert ".env.hotkey-8 already exists" in result.stderr
+    assert not (project_dir / ".env.hotkey-7").exists()
+    assert occupied.is_symlink()
     assert not command_log.exists()
 
 

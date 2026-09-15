@@ -77,7 +77,7 @@ def test_sync_generation_maps_sn34_request_and_decodes_original_bytes(monkeypatc
 
     assert result["data"] == media
     assert result["metadata"] == {
-        "model": "gpt-image-2.5-flare",
+        "model": "gpt-image-2.5-sunburst",
         "provider": "gpti2",
         "mime_type": "image/png",
         "size": "2400x1600",
@@ -92,7 +92,7 @@ def test_sync_generation_maps_sn34_request_and_decodes_original_bytes(monkeypatc
                 "Idempotency-Key": "task-gpti2-123",
             },
             {
-                "model": "gpt-image-2.5-flare",
+                "model": "gpt-image-2.5-sunburst",
                 "prompt": "A red fox running through fresh snow",
                 "size": "2400x1600",
                 "quality": "medium",

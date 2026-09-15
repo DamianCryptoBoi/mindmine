@@ -154,6 +154,30 @@ contains_key() {
     return 1
 }
 
+find_unused_axon_port() {
+    python3 - "$@" <<'PY'
+import random
+import socket
+import sys
+
+excluded = {int(port) for port in sys.argv[1:] if port}
+ports = [port for port in range(8000, 9001) if port not in excluded]
+random.SystemRandom().shuffle(ports)
+for port in ports:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+    except OSError:
+        continue
+    finally:
+        sock.close()
+    print(port)
+    break
+else:
+    raise SystemExit("no unused TCP port is available from 8000 through 9000")
+PY
+}
+
 [[ -f "$SOURCE_ENV" ]] || fail "Missing .env in the repository root."
 [[ -f "$TEMPLATE_FILE" ]] || fail "Missing .env.gen_miner.hotkey.template in the repository root."
 [[ -f "$PM2_CONFIG" ]] || fail "Missing gen_miner.config.js in the repository root."
@@ -163,15 +187,19 @@ command -v pm2 >/dev/null 2>&1 || fail "pm2 is required."
 
 printf 'Wallet name: ' >&2
 IFS= read -r wallet_name || fail "No wallet name was provided."
-printf 'Hotkey: ' >&2
-IFS= read -r hotkey || fail "No hotkey was provided."
+printf 'Hotkeys (space-separated): ' >&2
+read -r -a hotkeys || fail "No hotkeys were provided."
 
 [[ "$wallet_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Wallet name may contain only letters, numbers, dots, underscores, and hyphens."
-[[ "$hotkey" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Hotkey may contain only letters, numbers, dots, underscores, and hyphens."
-
-env_file=".env.$hotkey"
-target_path="$PROJECT_DIRECTORY/$env_file"
-[[ ! -e "$target_path" ]] || fail "$env_file already exists; refusing to overwrite it."
+[[ ${#hotkeys[@]} -gt 0 ]] || fail "No hotkeys were provided."
+validated_hotkeys=()
+for hotkey in "${hotkeys[@]}"; do
+    [[ "$hotkey" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "Hotkey may contain only letters, numbers, dots, underscores, and hyphens."
+    ! contains_key "$hotkey" "${validated_hotkeys[@]-}" || fail "Duplicate hotkey: $hotkey."
+    validated_hotkeys+=("$hotkey")
+    env_file=".env.$hotkey"
+    [[ ! -e "$PROJECT_DIRECTORY/$env_file" && ! -L "$PROJECT_DIRECTORY/$env_file" ]] || fail "$env_file already exists; refusing to overwrite it."
+done
 
 image_options=()
 for service in openai openrouter stabilityai maxcheapai ckey vertexgen gpti2; do
@@ -204,27 +232,6 @@ PY
 then
     fail "The detected external IP address is invalid."
 fi
-
-axon_port="$(python3 - <<'PY'
-import random
-import socket
-
-ports = list(range(8000, 9001))
-random.SystemRandom().shuffle(ports)
-for port in ports:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("0.0.0.0", port))
-    except OSError:
-        continue
-    finally:
-        sock.close()
-    print(port)
-    break
-else:
-    raise SystemExit("no unused TCP port is available from 8000 through 9000")
-PY
-)" || fail "Could not find an unused TCP port from 8000 through 9000."
 
 image_key="$(service_key_name "$image_service")"
 video_key="$(service_key_name "$video_service")"
@@ -273,7 +280,7 @@ replacement_value() {
 }
 
 umask 077
-temp_path="$(mktemp "$PROJECT_DIRECTORY/.env.$hotkey.tmp.XXXXXX")"
+temp_path=""
 cleanup() {
     if [[ -n "${temp_path:-}" && -e "$temp_path" ]]; then
         rm -f -- "$temp_path"
@@ -281,36 +288,45 @@ cleanup() {
 }
 trap cleanup EXIT
 
-written_keys=()
-while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
-        key="${BASH_REMATCH[1]}"
-        if contains_key "$key" "${replacement_keys[@]}"; then
+axon_ports=()
+for hotkey in "${hotkeys[@]}"; do
+    axon_port="$(find_unused_axon_port "${axon_ports[@]-}")" || fail "Could not find an unused TCP port from 8000 through 9000."
+    axon_ports+=("$axon_port")
+    env_file=".env.$hotkey"
+    target_path="$PROJECT_DIRECTORY/$env_file"
+    temp_path="$(mktemp "$PROJECT_DIRECTORY/.env.$hotkey.tmp.XXXXXX")"
+
+    written_keys=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+            key="${BASH_REMATCH[1]}"
+            if contains_key "$key" "${replacement_keys[@]}"; then
+                printf '%s=%s\n' "$key" "$(replacement_value "$key")" >> "$temp_path"
+                written_keys+=("$key")
+                continue
+            fi
+            if is_provider_key "$key"; then
+                continue
+            fi
+        fi
+        printf '%s\n' "$line" >> "$temp_path"
+    done < "$TEMPLATE_FILE"
+
+    for key in "${replacement_keys[@]}"; do
+        if ! contains_key "$key" "${written_keys[@]}"; then
             printf '%s=%s\n' "$key" "$(replacement_value "$key")" >> "$temp_path"
-            written_keys+=("$key")
-            continue
         fi
-        if is_provider_key "$key"; then
-            continue
-        fi
-    fi
-    printf '%s\n' "$line" >> "$temp_path"
-done < "$TEMPLATE_FILE"
+    done
 
-for key in "${replacement_keys[@]}"; do
-    if ! contains_key "$key" "${written_keys[@]}"; then
-        printf '%s=%s\n' "$key" "$(replacement_value "$key")" >> "$temp_path"
+    chmod 600 "$temp_path"
+    if ! ln "$temp_path" "$target_path" 2>/dev/null; then
+        fail "$env_file already exists; refusing to overwrite it."
     fi
+    rm -f -- "$temp_path"
+    temp_path=""
+
+    info "Created $env_file for wallet $wallet_name and hotkey $hotkey."
+    info "Using external IP $external_ip and unused TCP port $axon_port."
+    info "Starting PM2 process $hotkey with image=$image_service and video=$video_service."
+    GEN_MINER_ENV_FILE="$env_file" pm2 start gen_miner.config.js
 done
-
-chmod 600 "$temp_path"
-if ! ln "$temp_path" "$target_path" 2>/dev/null; then
-    fail "$env_file already exists; refusing to overwrite it."
-fi
-rm -f -- "$temp_path"
-temp_path=""
-
-info "Created $env_file for wallet $wallet_name and hotkey $hotkey."
-info "Using external IP $external_ip and unused TCP port $axon_port."
-info "Starting PM2 process $hotkey with image=$image_service and video=$video_service."
-GEN_MINER_ENV_FILE="$env_file" pm2 start gen_miner.config.js
