@@ -113,11 +113,12 @@ class MaxCheapAIService(BaseGenerationService):
         )
         model = IMAGE_MODEL if task.modality == "image" else VIDEO_MODEL
         started_at = time.monotonic()
-        payload = self._build_payload(task)
 
         checkpoint = task.checkpoint
         resumed = checkpoint is not None
         retries_used = 0
+        checkpoint_stage = checkpoint.get("stage") if checkpoint else None
+        checkpoint_start_frame = checkpoint.get("start_frame") if checkpoint else None
         if checkpoint is not None:
             self._validate_checkpoint(checkpoint, task.modality)
             try:
@@ -126,8 +127,26 @@ class MaxCheapAIService(BaseGenerationService):
                 raise ValueError("Invalid MaxCheapAI checkpoint retries_used") from exc
             if not 0 <= retries_used <= self.max_retries:
                 raise ValueError("Invalid MaxCheapAI checkpoint retries_used")
-            if checkpoint.get("retry_pending"):
+            if checkpoint.get("retry_pending") and checkpoint_stage != "start_frame":
                 checkpoint = None
+
+        payload = self._build_payload(task)
+        if task.modality == "video":
+            start_frame = None
+            if task.checkpoint is None or checkpoint_stage == "start_frame":
+                start_frame = self._generate_start_frame(
+                    task,
+                    checkpoint,
+                    checkpoint_callback,
+                    poll_interval,
+                    poll_timeout,
+                )
+                checkpoint = None
+                retries_used = 0
+            elif checkpoint_stage == "video":
+                start_frame = checkpoint_start_frame
+            if start_frame is not None:
+                payload["startFrame"] = start_frame
 
         while True:
             if checkpoint is not None:
@@ -139,15 +158,17 @@ class MaxCheapAIService(BaseGenerationService):
                 )
             else:
                 request_id = self._submit(task.modality, payload)
-                checkpoint_callback(
-                    {
-                        "kind": CHECKPOINT_KIND_MAXCHEAPAI,
-                        "request_id": request_id,
-                        "modality": task.modality,
-                        "model": model,
-                        "retries_used": retries_used,
-                    }
-                )
+                next_checkpoint = {
+                    "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                    "request_id": request_id,
+                    "modality": task.modality,
+                    "model": model,
+                    "retries_used": retries_used,
+                }
+                if task.modality == "video":
+                    next_checkpoint["stage"] = "video"
+                    next_checkpoint["start_frame"] = payload.get("startFrame")
+                checkpoint_callback(next_checkpoint)
 
             try:
                 status_result = self._poll(
@@ -163,15 +184,17 @@ class MaxCheapAIService(BaseGenerationService):
                     checkpoint_callback(None)
                     raise
                 retries_used += 1
-                checkpoint_callback(
-                    {
-                        "kind": CHECKPOINT_KIND_MAXCHEAPAI,
-                        "modality": task.modality,
-                        "model": model,
-                        "retry_pending": True,
-                        "retries_used": retries_used,
-                    }
-                )
+                retry_checkpoint = {
+                    "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                    "modality": task.modality,
+                    "model": model,
+                    "retry_pending": True,
+                    "retries_used": retries_used,
+                }
+                if task.modality == "video":
+                    retry_checkpoint["stage"] = "video"
+                    retry_checkpoint["start_frame"] = payload.get("startFrame")
+                checkpoint_callback(retry_checkpoint)
                 bt.logging.warning(
                     f"Retrying MaxCheapAI {task.modality} generation "
                     f"({retries_used}/{self.max_retries})"
@@ -205,6 +228,94 @@ class MaxCheapAIService(BaseGenerationService):
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+        }
+
+    def _generate_start_frame(
+        self,
+        task: GenerationTask,
+        checkpoint: Optional[Dict[str, Any]],
+        checkpoint_callback: CheckpointFn,
+        poll_interval: float,
+        poll_timeout: float,
+    ) -> Optional[Dict[str, Any]]:
+        retries_used = int(checkpoint.get("retries_used", 0)) if checkpoint else 0
+        if checkpoint and checkpoint.get("retry_pending"):
+            checkpoint = None
+
+        while True:
+            if checkpoint is not None:
+                request_id = checkpoint["request_id"]
+                checkpoint = None
+            else:
+                request_id = self._submit(
+                    "image", self._build_start_frame_payload(task)
+                )
+                checkpoint_callback(
+                    {
+                        "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                        "request_id": request_id,
+                        "modality": "video",
+                        "stage": "start_frame",
+                        "model": IMAGE_MODEL,
+                        "retries_used": retries_used,
+                    }
+                )
+
+            try:
+                result = self._poll(
+                    "image",
+                    request_id,
+                    poll_interval=poll_interval,
+                    poll_timeout=poll_timeout,
+                )
+                return {
+                    "id": result.get("id", request_id),
+                    "label": "Nano Banana Pro start frame",
+                    "url": self._result_url("image", result),
+                    "type": "image",
+                }
+            except _ProviderGenerationFailed:
+                if retries_used >= self.max_retries:
+                    bt.logging.warning(
+                        "MaxCheapAI start frame generation exhausted retries; "
+                        "falling back to text-to-video"
+                    )
+                    return None
+                retries_used += 1
+                checkpoint_callback(
+                    {
+                        "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                        "modality": "video",
+                        "stage": "start_frame",
+                        "model": IMAGE_MODEL,
+                        "retry_pending": True,
+                        "retries_used": retries_used,
+                    }
+                )
+                bt.logging.warning(
+                    "Retrying MaxCheapAI start frame generation "
+                    f"({retries_used}/{self.max_retries})"
+                )
+                time.sleep(max(0.0, self.retry_delay))
+            except Exception:
+                checkpoint_callback(None)
+                raise
+
+    def _build_start_frame_payload(self, task: GenerationTask) -> Dict[str, Any]:
+        parameters = task.parameters or {}
+        aspect_ratio = parameters.get(
+            "aspect_ratio", parameters.get("aspectRatio", "16:9")
+        )
+        if aspect_ratio not in VIDEO_ASPECT_RATIOS:
+            aspect_ratio = "16:9"
+        return {
+            "modelId": IMAGE_MODEL,
+            "prompt": task.prompt,
+            "resolution": "1K",
+            "speed": "priority",
+            "aspectRatio": aspect_ratio,
+            "imageCount": 1,
+            "autoEnhance": False,
         }
 
     def _build_payload(self, task: GenerationTask) -> Dict[str, Any]:

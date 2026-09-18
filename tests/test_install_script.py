@@ -115,6 +115,29 @@ assert not blocked.intersection(sys.modules)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_miner_requests_import_does_not_require_ffmpeg():
+    code = """
+import sys
+
+class BlockFfmpegImport:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] == "ffmpeg":
+            raise AssertionError(f"unexpected media dependency: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockFfmpegImport())
+from gas.protocol.miner_requests import fetch_generator_performance
+assert callable(fetch_generator_performance)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_generator_only_preserves_existing_venv_without_clear_flag(tmp_path):
     shutil.copy(REPO_ROOT / "install.sh", tmp_path / "install.sh")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'gas'\n")

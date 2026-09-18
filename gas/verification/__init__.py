@@ -1,48 +1,59 @@
-"""Lazy verification exports.
+from .verification_pipeline import run_verification, verify_media, get_verification_summary
+from .clip_utils import (
+    preload_clip_models,
+    clear_clip_models,
+    calculate_clip_alignment,
+    calculate_clip_alignment_consensus,
+    serialize_features,
+    deserialize_features,
+    find_near_duplicate_by_embedding,
+    DEFAULT_EMBEDDING_SIMILARITY_THRESHOLD,
+)
+from .duplicate_detection import (
+    compute_image_hash,
+    compute_video_hash,
+    compute_media_hash,
+    compute_crop_resistant_hash,
+    hamming_distance,
+    count_crop_segment_matches,
+    find_duplicates,
+    check_duplicate_in_db,
+    DEFAULT_HAMMING_THRESHOLD,
+    DEFAULT_CROP_RESISTANT_MATCH_THRESHOLD,
+)
+from .c2pa_verification import (
+    verify_c2pa,
+    C2PAVerificationResult,
+    TRUSTED_CERT_ISSUERS,
+    TRUSTED_CA_ISSUERS,
+    detect_media_format,
+)
 
-Generator miners only need media-format and C2PA helpers. Validator CLIP and
-duplicate-detection dependencies are loaded only when those APIs are used.
-"""
-
-from importlib import import_module
-
-
-_EXPORTS = {
-    "run_verification": "gas.verification.verification_pipeline",
-    "verify_media": "gas.verification.verification_pipeline",
-    "get_verification_summary": "gas.verification.verification_pipeline",
-    "preload_clip_models": "gas.verification.clip_utils",
-    "clear_clip_models": "gas.verification.clip_utils",
-    "calculate_clip_alignment": "gas.verification.clip_utils",
-    "calculate_clip_alignment_consensus": "gas.verification.clip_utils",
-    "serialize_features": "gas.verification.clip_utils",
-    "deserialize_features": "gas.verification.clip_utils",
-    "find_near_duplicate_by_embedding": "gas.verification.clip_utils",
-    "DEFAULT_EMBEDDING_SIMILARITY_THRESHOLD": "gas.verification.clip_utils",
-    "compute_image_hash": "gas.verification.duplicate_detection",
-    "compute_video_hash": "gas.verification.duplicate_detection",
-    "compute_media_hash": "gas.verification.duplicate_detection",
-    "compute_crop_resistant_hash": "gas.verification.duplicate_detection",
-    "hamming_distance": "gas.verification.duplicate_detection",
-    "count_crop_segment_matches": "gas.verification.duplicate_detection",
-    "find_duplicates": "gas.verification.duplicate_detection",
-    "check_duplicate_in_db": "gas.verification.duplicate_detection",
-    "DEFAULT_HAMMING_THRESHOLD": "gas.verification.duplicate_detection",
-    "DEFAULT_CROP_RESISTANT_MATCH_THRESHOLD": "gas.verification.duplicate_detection",
-    "verify_c2pa": "gas.verification.c2pa_verification",
-    "C2PAVerificationResult": "gas.verification.c2pa_verification",
-    "TRUSTED_CERT_ISSUERS": "gas.verification.c2pa_verification",
-    "TRUSTED_CA_ISSUERS": "gas.verification.c2pa_verification",
-    "detect_media_format": "gas.verification.c2pa_verification",
-}
-
-__all__ = list(_EXPORTS)
-
-
-def __getattr__(name):
-    module_name = _EXPORTS.get(name)
-    if module_name is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(module_name), name)
-    globals()[name] = value
-    return value
+__all__ = [
+    "run_verification",
+    "verify_media",
+    "get_verification_summary",
+    "preload_clip_models",
+    "clear_clip_models",
+    "calculate_clip_alignment",
+    "calculate_clip_alignment_consensus",
+    "serialize_features",
+    "deserialize_features",
+    "find_near_duplicate_by_embedding",
+    "DEFAULT_EMBEDDING_SIMILARITY_THRESHOLD",
+    "compute_image_hash",
+    "compute_video_hash",
+    "compute_media_hash",
+    "compute_crop_resistant_hash",
+    "hamming_distance",
+    "count_crop_segment_matches",
+    "find_duplicates",
+    "check_duplicate_in_db",
+    "DEFAULT_HAMMING_THRESHOLD",
+    "DEFAULT_CROP_RESISTANT_MATCH_THRESHOLD",
+    "verify_c2pa",
+    "C2PAVerificationResult",
+    "TRUSTED_CERT_ISSUERS",
+    "TRUSTED_CA_ISSUERS",
+    "detect_media_format",
+]

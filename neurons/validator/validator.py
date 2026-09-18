@@ -10,10 +10,16 @@ from dotenv import load_dotenv
 import bittensor as bt
 
 from gas import __spec_version__ as spec_version
-from gas.protocol.validator_requests import get_benchmark_results
-from gas.protocol.validator_requests import get_escrow_addresses  # noqa: F401  HOTFIX: temporarily unused
+from gas.protocol.validator_requests import get_benchmark_results, get_current_kings
+from gas.koth_weights import (
+    build_koth_weights,
+    chains_by_modality,
+    discriminator_emissions_enabled,
+    kings_by_modality,
+)
 from gas.utils.autoupdater import autoupdate
 from gas.cache import ContentManager
+from gas.cache.util.cache_reclaim import start_cache_reclaim
 from gas.utils.metagraph import create_set_weights
 from gas.types import (
     NeuronType,
@@ -26,11 +32,14 @@ from gas.utils import (
 from gas.utils.state_manager import load_validator_state, save_validator_state
 from gas.utils.wandb_utils import init_wandb, clean_wandb_cache
 from neurons.base import BaseNeuron
+from gas.evaluation.generator_scores import GeneratorScoreState
 from gas.evaluation import (
     GenerativeChallengeManager,
     MinerTypeTracker,
+    combine_generator_rewards,
     get_generator_base_rewards,
-    get_generator_fool_bonuses,
+    get_generator_qualification,
+    resolve_generator_qualification,
 )
 
 try:
@@ -40,12 +49,34 @@ except Exception:
 
 
 MAINNET_UID = 34
-SS58_ADDRESSES = {
-    "burn": "5HjBSeeoz52CLfvDWDkzupqrYLHz1oToDPHjdmJjc4TF68LQ",
-    "video_escrow": "5G6BJ1Z6LeDptRn5GTw74QSDmG1FP3eqVque5JhUb5zeEyQa",
-    "image_escrow": "5EUJFyH4ZSSiD3C8sM698nsVE26Tq98LoBwkmopmWZqaZqCA",
-    "audio_escrow": "5F9Qo4jqurfx3qHsC2kQtvge7Si5aW1BfYKwpxnnpVxouPyF",
-}
+BURN_PERCENTAGE = 0.0  # Pay the full 40/40/4/16 split.
+BURN_SS58 = "5HjBSeeoz52CLfvDWDkzupqrYLHz1oToDPHjdmJjc4TF68LQ"
+
+
+class _KingsState:
+    """Persist last-known KOTH kings across validator restarts."""
+
+    def __init__(self):
+        self.payload = None
+
+    def save_state(self, save_dir: str, filename: str) -> None:
+        import json
+        import os
+
+        path = os.path.join(save_dir, filename)
+        with open(path, "w") as f:
+            json.dump(self.payload, f)
+
+    def load_state(self, save_dir: str, filename: str) -> bool:
+        import json
+        import os
+
+        path = os.path.join(save_dir, filename)
+        if not os.path.exists(path):
+            return False
+        with open(path) as f:
+            self.payload = json.load(f)
+        return True
 
 
 class Validator(BaseNeuron):
@@ -73,10 +104,14 @@ class Validator(BaseNeuron):
         self._state_lock = asyncio.Lock()
 
         self.content_manager = ContentManager(self.config.cache.base_dir)
+        start_cache_reclaim(self.config.cache.base_dir)
 
         ## Typesafety
         self.set_weights_fn = create_set_weights(spec_version, self.config.netuid)
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
+        self.kings_state = _KingsState()
+        self.generator_qualification = {}  # Hotkey-keyed; UIDs can be reassigned.
+        self.generator_score_state = GeneratorScoreState()
         bt.logging.info(f"Initialized scores vector for {len(self.scores)} miners")
 
         if not self.config.wandb_off:
@@ -165,20 +200,34 @@ class Validator(BaseNeuron):
 
     @on_block_interval("epoch_length")
     async def set_weights(self, block):
-        """
-        Query orchestrator for results, computes rewards, updates scores, set weights
-        """
-        bt.logging.info(f"Updating scores at block {block}")
-        generator_uids = await self.update_scores()
+        """Set burn weights, or calculate rewards when full burn is disabled."""
+        if BURN_PERCENTAGE < 1.0:
+            bt.logging.info(f"Updating scores at block {block}")
+            generator_uids = await self.update_scores()
         
-        if generator_uids is None:
-            generator_uids = []
-            bt.logging.warning("No generator rewards available; using empty generator_uids")
+            if generator_uids is None:
+                generator_uids = []
+                bt.logging.warning("No generator rewards available; using empty generator_uids")
 
-        # HOTFIX: API unstable; always use hardcoded escrow addresses.
-        bt.logging.info("HOTFIX: using hardcoded default escrow addresses")
-        active_ss58_addresses = SS58_ADDRESSES
-        
+            kings_payload = await get_current_kings(
+                self.wallet.hotkey, base_url=self.config.benchmark_api_url
+            )
+            if kings_payload is not None:
+                self.kings_state.payload = kings_payload
+            elif self.kings_state.payload is not None:
+                bt.logging.warning("kings API unavailable; using last known kings")
+                kings_payload = self.kings_state.payload
+            else:
+                bt.logging.warning(
+                    "kings API unavailable and no cached kings; "
+                    "discriminator shares will burn"
+                )
+                kings_payload = {"kings": []}
+
+            kings = kings_by_modality(kings_payload)
+            chains = chains_by_modality(kings_payload)
+            split = (kings_payload or {}).get("split")
+
         async with self._state_lock:
             bt.logging.debug("set_weights() acquired state lock")
             try:
@@ -194,64 +243,40 @@ class Validator(BaseNeuron):
                         "responses from miners, or a bug in your reward functions."
                     )
 
-                # Weight budget (must sum to 1.0)
-                burn_pct      = 0.
-                video_pct     = .4
-                image_pct     = .4
-                audio_pct     = .04
-                generator_pct = .16
+                def uid_for_hotkey(hotkey_ss58: str):
+                    try:
+                        return self.subtensor.get_uid_for_hotkey_on_subnet(
+                            hotkey_ss58=hotkey_ss58,
+                            netuid=self.config.netuid,
+                        )
+                    except Exception as e:
+                        bt.logging.warning(f"Could not resolve UID for {hotkey_ss58[:8]}...: {e}")
+                        return None
 
-                # Resolve escrow/burn UIDs at current chain head. `block` is an
-                # interval marker (0 at startup) and must not be used as a query
-                # block: a non-archive node has pruned old state and raises
-                # StateDiscardedError under async-substrate-interface 2.x.
-                burn_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                    hotkey_ss58=active_ss58_addresses["burn"],
-                    netuid=self.config.netuid,
+                burn_uid = uid_for_hotkey(BURN_SS58)
+                if burn_uid is None or not 0 <= burn_uid < int(self.metagraph.n):
+                    bt.logging.error("Burn UID unavailable; skipping weight submission")
+                    return False
+
+                if BURN_PERCENTAGE == 1.0:
+                    normed_weights = np.zeros(int(self.metagraph.n), dtype=np.float64)
+                else:
+                    normed_weights = build_koth_weights(
+                        n=int(self.metagraph.n),
+                        scores=self.scores,
+                        generator_uids=generator_uids,
+                        kings=kings,
+                        uid_for_hotkey=uid_for_hotkey,
+                        burn_uid=burn_uid,
+                        split=split,
+                        chains=chains,
+                        emissions_enabled=discriminator_emissions_enabled(kings_payload),
+                    )
+                    normed_weights *= 1.0 - BURN_PERCENTAGE
+                normed_weights[burn_uid] += BURN_PERCENTAGE
+                bt.logging.info(
+                    f"Burn percentage={BURN_PERCENTAGE:.0%}, burn UID={burn_uid}"
                 )
-                video_escrow_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                    hotkey_ss58=active_ss58_addresses["video_escrow"],
-                    netuid=self.config.netuid,
-                )
-                image_escrow_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                    hotkey_ss58=active_ss58_addresses["image_escrow"],
-                    netuid=self.config.netuid,
-                )
-                audio_escrow_uid = self.subtensor.get_uid_for_hotkey_on_subnet(
-                    hotkey_ss58=active_ss58_addresses["audio_escrow"],
-                    netuid=self.config.netuid,
-                )
-
-                special_uids = {burn_uid, image_escrow_uid, video_escrow_uid, audio_escrow_uid}
-
-                # Compute norm excluding specials
-                norm = np.ones_like(self.scores)
-                active_uids = [uid for uid in generator_uids if uid not in special_uids]
-                if active_uids:
-                    norm[active_uids] = np.linalg.norm(self.scores[active_uids], ord=1)
-
-                if np.any(norm == 0) or np.isnan(norm).any():
-                    norm = np.ones_like(norm)
-
-                normed_weights = self.scores / norm
-
-                active_uids_set = set(active_uids)
-                for uid in range(len(normed_weights)):
-                    if uid not in special_uids and uid not in active_uids_set:
-                        normed_weights[uid] = 0.0
-
-                active_mask = np.array([uid in active_uids_set for uid in range(len(normed_weights))])
-                normed_weights[active_mask] *= generator_pct
-
-                normed_weights[burn_uid]         = burn_pct
-                normed_weights[video_escrow_uid] = video_pct
-                normed_weights[image_escrow_uid] = image_pct
-                normed_weights[audio_escrow_uid] = audio_pct
-
-                # Verify allocations
-                total_weight = np.sum(normed_weights)
-                actual_burn_rate = normed_weights[burn_uid] / total_weight if total_weight > 0 else 0
-                bt.logging.info(f"Total weight sum: {total_weight:.4f}, Actual burn rate: {actual_burn_rate:.4f} (target: {burn_pct})")
 
                 self.set_weights_fn(
                     self.wallet, self.metagraph, self.subtensor, (uids, normed_weights)
@@ -269,7 +294,7 @@ class Validator(BaseNeuron):
         Update self.scores with exponential moving average of rewards.
         """
         # Verification stats from last 24h (all verified, rewarded or not) for base rewards.
-        # Matches the fool-bonus liveness horizon (max_inactive_hours=24). At the current
+        # Matches the liveness horizon (max_inactive_hours=24). At the current
         # challenge rate a 4h window held only ~2 verified gens per modality per miner,
         # so pass rates and volume were dominated by challenge-scheduling luck.
         verification_stats = self.content_manager.get_verification_stats_last_n_hours(
@@ -288,29 +313,40 @@ class Validator(BaseNeuron):
             generator_liveness = self.generative_challenge_manager.get_all_generator_last_seen()
             if generator_liveness:
                 bt.logging.debug(f"Using liveness data for {len(generator_liveness)} generators")
-        
-        fool_bonuses = get_generator_fool_bonuses(
-            generator_results, 
-            self.metagraph,
-            generator_liveness=generator_liveness,
-            max_inactive_hours=max_inactive_hours,
-        )
-        all_generator_uids = set(generator_base_rewards.keys()) | set(fool_bonuses.keys())
 
-        # Combine per-modality base rewards with fool-rate bonus (1 + bonus).
-        # Base rewards always count; fool rate adds a bonus on top.
+        parsed_qualification = get_generator_qualification(
+            generator_results,
+            self.metagraph,
+            image_fool_cutoff=self.config.scoring.image_fool_cutoff,
+            video_fool_cutoff=self.config.scoring.video_fool_cutoff,
+            min_fool_samples=self.config.scoring.min_fool_samples,
+        )
+        if parsed_qualification is not None:
+            self.generator_qualification = parsed_qualification
+            if hasattr(self, "generative_challenge_manager") and self.generative_challenge_manager:
+                self.generative_challenge_manager.set_qualification(
+                    parsed_qualification, fresh=True
+                )
+        else:
+            bt.logging.warning(
+                "Unusable generator-results this epoch; using cached qualification for pay"
+            )
+            if hasattr(self, "generative_challenge_manager") and self.generative_challenge_manager:
+                self.generative_challenge_manager.set_qualification(None, fresh=False)
+
+        # Pay only in modalities that cleared the 7-day fool-rate gate.
         # Image and video contributions are weighted independently via config.
         image_weight = self.config.scoring.image_weight
         video_weight = self.config.scoring.video_weight
-        rewards = {}
-        for uid in all_generator_uids:
-            base = generator_base_rewards.get(uid, {"image": 0, "video": 0})
-            bonus = fool_bonuses.get(uid, 0.0)
-            rewards[uid] = (
-                image_weight * base["image"] + video_weight * base["video"]
-            ) * (1.0 + bonus)
+        rewards = combine_generator_rewards(
+            generator_base_rewards,
+            resolve_generator_qualification(self.generator_qualification, self.metagraph),
+            image_weight=image_weight,
+            video_weight=video_weight,
+        )
         bt.logging.debug(
-            f"Image weight: {image_weight}, Video weight: {video_weight}"
+            f"Image weight: {image_weight}, Video weight: {video_weight}; "
+            f"{len(rewards)} generators earned R > 0"
         )
 
         if len(rewards) == 0:
@@ -322,47 +358,38 @@ class Validator(BaseNeuron):
                 bt.logging.trace(
                     "No generator rewards: no base rewards or multipliers available."
                 )
-            return
 
         async with self._state_lock:
-            extend_scores = max(list(rewards.keys())) - len(self.scores) + 1
-            if extend_scores > 0:
-                self.scores = np.append(self.scores, np.zeros(extend_scores))
-
-            reward_arr = np.array([rewards.get(i, 0) for i in range(len(self.scores))])
-
-            # Alpha for generator score EMA - higher = faster decay, less reward persistence
-            # 0.5 = 50% new rewards, 50% historical (aggressive decay for inactive miners)
+            # Gate each modality's history before combining, even if no miner
+            # earns this epoch. A scalar EMA would retain disqualified pay.
             alpha = 0.5
-            self.scores = alpha * reward_arr + (1 - alpha) * self.scores
-
-            # Hard cutoff: zero out scores for generators not active within liveness window.
-            # Checks the actual last_seen timestamp, not just dict membership.
-            if generator_liveness:
-                cutoff = time.time() - max_inactive_hours * 3600
-                inactive_count = 0
-                for uid in range(len(self.scores)):
-                    if uid < len(self.metagraph.hotkeys) and self.scores[uid] > 0:
-                        hotkey = self.metagraph.hotkeys[uid]
-                        last_seen = generator_liveness.get(hotkey, 0)
-                        if last_seen < cutoff:
-                            self.scores[uid] = 0
-                            inactive_count += 1
-                if inactive_count > 0:
-                    bt.logging.info(f"Zeroed scores for {inactive_count} inactive generators (not seen in {max_inactive_hours}h)")
+            hotkeys = list(self.metagraph.hotkeys)
+            scores = self.generator_score_state.update(
+                generator_base_rewards,
+                self.generator_qualification,
+                hotkeys,
+                image_weight=image_weight,
+                video_weight=video_weight,
+                alpha=alpha,
+                last_seen=generator_liveness,
+                inactive_cutoff=time.time() - max_inactive_hours * 3600,
+            )
+            self.scores = np.zeros(len(hotkeys), dtype=np.float64)
+            for uid, score in scores.items():
+                self.scores[uid] = score
 
         bt.logging.info(
             f"Updated scores for {len(rewards)} miners with EMA (alpha={alpha})"
         )
 
-        if media_ids:
+        if media_ids and rewards:
             success = self.content_manager.mark_media_rewarded(media_ids)
             if success:
                 bt.logging.info(f"Marked {len(media_ids)} media entries as rewarded")
             else:
                 bt.logging.warning("Failed to mark media as rewarded")
 
-        return list(all_generator_uids)
+        return list(rewards.keys())
 
     async def log_on_block(self, block):
         """
@@ -390,9 +417,12 @@ class Validator(BaseNeuron):
         async with self._state_lock:
             bt.logging.debug("save_state() acquired state lock")
             try:
+                self.generator_score_state.qualification = self.generator_qualification
                 state_data = {"scores.npy": self.scores}
                 state_objects = [
-                    (self.generative_challenge_manager, "challenge_tasks.pkl")
+                    (self.generative_challenge_manager, "challenge_tasks.pkl"),
+                    (self.kings_state, "kings.json"),
+                    (self.generator_score_state, "generator_scores.json"),
                 ]
 
                 success = save_validator_state(
@@ -416,9 +446,15 @@ class Validator(BaseNeuron):
         Load validator state, falling back to backup if needed.
         """
         try:
+            self.generator_qualification = {}
+            # Disk cache is fallback for pay only; challenge sampling becomes
+            # fresh only after a successful API fetch in this process.
+            self.generative_challenge_manager.set_qualification(None, fresh=False)
             state_data_keys = ["scores.npy"]
             state_objects = [
-                (self.generative_challenge_manager, "challenge_tasks.pkl")
+                (self.generative_challenge_manager, "challenge_tasks.pkl"),
+                (self.kings_state, "kings.json"),
+                (self.generator_score_state, "generator_scores.json"),
             ]
 
             loaded_state = load_validator_state(
@@ -429,8 +465,16 @@ class Validator(BaseNeuron):
             )
 
             if loaded_state is not None and "scores.npy" in loaded_state:
-                self.scores = loaded_state["scores.npy"]
-                bt.logging.info(f"Loaded scores vector for {len(self.scores)} miners")
+                self.generator_qualification = self.generator_score_state.qualification
+                # scores.npy is retained for snapshot compatibility, not as EMA
+                # input: legacy scalars cannot be split by modality or hotkey.
+                # Rebuild the payout vector after qualification/liveness checks
+                # in update_scores; a restored gate is fallback during outages.
+                self.scores = np.zeros(len(self.metagraph.hotkeys), dtype=np.float64)
+                bt.logging.info(
+                    f"Loaded modality EMA histories for {len(self.generator_score_state.by_hotkey)} hotkeys; "
+                    "legacy scalar scores are not reused"
+                )
                 return True
             else:
                 bt.logging.warning("No valid state found")

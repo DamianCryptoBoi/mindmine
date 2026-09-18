@@ -1,6 +1,9 @@
+import importlib.util
 import json
+import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 import requests
@@ -151,7 +154,7 @@ def test_image_request_honors_resolution_and_returns_untouched_bytes(monkeypatch
     ]
 
 
-def test_video_request_maps_sn34_tier_enables_audio_and_polls(monkeypatch):
+def test_video_request_generates_matching_start_frame_before_veo(monkeypatch):
     service = configure_service(monkeypatch)
     original_media = b"\x00\x00\x00\x18ftypisom-provider-c2pa-video"
     submitted = []
@@ -160,9 +163,10 @@ def test_video_request_maps_sn34_tier_enables_audio_and_polls(monkeypatch):
 
     def post(url, headers, json, timeout):
         submitted.append((url, json))
+        request_id = 17 if url.endswith("/generate/image") else 18
         return FakeResponse(
             payload={
-                "requestId": 18,
+                "requestId": request_id,
                 "hpCost": 56,
                 "hpBalance": {"freeHp": 44, "paidHp": 50, "totalHp": 94},
             }
@@ -170,6 +174,16 @@ def test_video_request_maps_sn34_tier_enables_audio_and_polls(monkeypatch):
 
     def get(url, headers=None, timeout=None):
         nonlocal status_calls
+        if url.endswith("/generations/17"):
+            return FakeResponse(
+                payload={
+                    "id": 17,
+                    "modelId": "nano-banana-pro",
+                    "status": "success",
+                    "resultImages": [{"url": "https://media.example/start-frame.jpg"}],
+                    "errorMessage": None,
+                }
+            )
         if url.endswith("/video-generations/18"):
             status_calls += 1
             status = "processing" if status_calls == 1 else "success"
@@ -226,6 +240,18 @@ def test_video_request_maps_sn34_tier_enables_audio_and_polls(monkeypatch):
     assert status_calls == 2
     assert submitted == [
         (
+            "https://maxcheapai.com/api/generate/image",
+            {
+                "modelId": "nano-banana-pro",
+                "prompt": "A red fox running through fresh snow",
+                "resolution": "1K",
+                "speed": "priority",
+                "aspectRatio": "9:16",
+                "imageCount": 1,
+                "autoEnhance": False,
+            },
+        ),
+        (
             "https://maxcheapai.com/api/generate/video",
             {
                 "modelId": "veo-3.1",
@@ -235,13 +261,98 @@ def test_video_request_maps_sn34_tier_enables_audio_and_polls(monkeypatch):
                 "speed": "slow",
                 "aspectRatio": "9:16",
                 "generateAudio": True,
+                "startFrame": {
+                    "id": 17,
+                    "label": "Nano Banana Pro start frame",
+                    "url": "https://media.example/start-frame.jpg",
+                    "type": "image",
+                },
             },
-        )
+        ),
     ]
     assert checkpoints[-1] is None
 
 
-def test_checkpoint_resume_does_not_submit_duplicate_generation(monkeypatch):
+def test_video_falls_back_to_text_only_after_three_start_frame_retries(monkeypatch):
+    service = configure_service(monkeypatch)
+    submitted = []
+    request_ids = iter([1, 2, 3, 4, 5])
+
+    def post(url, headers, json, timeout):
+        submitted.append((url, json))
+        return FakeResponse(payload={"requestId": next(request_ids)})
+
+    def get(url, headers=None, timeout=None):
+        if "/video-generations/" in url:
+            return FakeResponse(
+                payload={
+                    "id": 5,
+                    "modelId": "veo-3.1",
+                    "status": "success",
+                    "resultVideoUrl": "https://media.example/fallback.mp4",
+                    "errorMessage": None,
+                }
+            )
+        if "/generations/" in url:
+            return FakeResponse(
+                payload={
+                    "status": "failed",
+                    "resultImages": [],
+                    "errorMessage": "start frame generation failed",
+                }
+            )
+        assert url == "https://media.example/fallback.mp4"
+        return FakeResponse(content=b"text-only-video")
+
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.post", post
+    )
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.get", get
+    )
+
+    result = service.process_with_checkpoint(
+        make_task("video", {"aspect_ratio": "16:9"})
+    )
+
+    assert result["data"] == b"text-only-video"
+    assert [url.rsplit("/", 1)[-1] for url, _ in submitted] == [
+        "image",
+        "image",
+        "image",
+        "image",
+        "video",
+    ]
+    assert "startFrame" not in submitted[-1][1]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        {
+            "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+            "request_id": 99,
+            "modality": "video",
+            "model": "veo-3.1",
+        },
+        {
+            "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+            "request_id": 99,
+            "modality": "video",
+            "stage": "video",
+            "model": "veo-3.1",
+            "start_frame": {
+                "id": 17,
+                "label": "Nano Banana Pro start frame",
+                "url": "https://media.example/start-frame.jpg",
+                "type": "image",
+            },
+        },
+    ],
+)
+def test_checkpoint_resume_does_not_submit_duplicate_generation(
+    monkeypatch, checkpoint
+):
     service = configure_service(monkeypatch)
     post_called = False
     checkpoints = []
@@ -283,15 +394,7 @@ def test_checkpoint_resume_does_not_submit_duplicate_generation(monkeypatch):
     )
 
     result = service.process_with_checkpoint(
-        make_task(
-            "video",
-            checkpoint={
-                "kind": CHECKPOINT_KIND_MAXCHEAPAI,
-                "request_id": 99,
-                "modality": "video",
-                "model": "veo-3.1",
-            },
-        ),
+        make_task("video", checkpoint=checkpoint),
         checkpoints.append,
     )
 
@@ -299,6 +402,133 @@ def test_checkpoint_resume_does_not_submit_duplicate_generation(monkeypatch):
     assert result["data"] == b"resumed-provider-bytes"
     assert result["metadata"]["resumed"] is True
     assert checkpoints == [None]
+
+
+def test_start_frame_checkpoint_resumes_image_before_submitting_video(monkeypatch):
+    service = configure_service(monkeypatch)
+    submitted = []
+
+    def post(url, headers, json, timeout):
+        submitted.append((url, json))
+        return FakeResponse(payload={"requestId": 18})
+
+    def get(url, headers=None, timeout=None):
+        if url.endswith("/generations/17"):
+            return FakeResponse(
+                payload={
+                    "id": 17,
+                    "modelId": "nano-banana-pro",
+                    "status": "success",
+                    "resultImages": [{"url": "https://media.example/start-frame.jpg"}],
+                    "errorMessage": None,
+                }
+            )
+        if url.endswith("/video-generations/18"):
+            return FakeResponse(
+                payload={
+                    "id": 18,
+                    "modelId": "veo-3.1",
+                    "status": "success",
+                    "resultVideoUrl": "https://media.example/resumed-frame.mp4",
+                    "errorMessage": None,
+                }
+            )
+        assert url == "https://media.example/resumed-frame.mp4"
+        return FakeResponse(content=b"video-from-resumed-frame")
+
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.post", post
+    )
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.get", get
+    )
+
+    result = service.process_with_checkpoint(
+        make_task(
+            "video",
+            checkpoint={
+                "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                "request_id": 17,
+                "modality": "video",
+                "stage": "start_frame",
+                "model": "nano-banana-pro",
+                "retries_used": 0,
+            },
+        )
+    )
+
+    assert result["data"] == b"video-from-resumed-frame"
+    assert len(submitted) == 1
+    assert submitted[0][0].endswith("/generate/video")
+    assert submitted[0][1]["startFrame"]["id"] == 17
+
+
+def test_video_retry_checkpoint_reuses_completed_start_frame(monkeypatch):
+    service = configure_service(monkeypatch)
+    submitted = []
+    start_frame = {
+        "id": 17,
+        "label": "Nano Banana Pro start frame",
+        "url": "https://media.example/start-frame.jpg",
+        "type": "image",
+    }
+
+    def post(url, headers, json, timeout):
+        submitted.append((url, json))
+        return FakeResponse(payload={"requestId": 99})
+
+    def get(url, headers=None, timeout=None):
+        if url.endswith("/video-generations/99"):
+            return FakeResponse(
+                payload={
+                    "id": 99,
+                    "modelId": "veo-3.1",
+                    "status": "success",
+                    "resultVideoUrl": "https://media.example/retried.mp4",
+                    "errorMessage": None,
+                }
+            )
+        assert url == "https://media.example/retried.mp4"
+        return FakeResponse(content=b"retried-video")
+
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.post", post
+    )
+    monkeypatch.setattr(
+        "neurons.generator.services.maxcheapai_service.requests.get", get
+    )
+
+    result = service.process_with_checkpoint(
+        make_task(
+            "video",
+            checkpoint={
+                "kind": CHECKPOINT_KIND_MAXCHEAPAI,
+                "modality": "video",
+                "stage": "video",
+                "model": "veo-3.1",
+                "start_frame": start_frame,
+                "retry_pending": True,
+                "retries_used": 1,
+            },
+        )
+    )
+
+    assert result["data"] == b"retried-video"
+    assert submitted == [
+        (
+            "https://maxcheapai.com/api/generate/video",
+            {
+                "modelId": "veo-3.1",
+                "prompt": "A red fox running through fresh snow",
+                "resolution": "720p",
+                "duration": 4,
+                "speed": "slow",
+                "aspectRatio": "16:9",
+                "generateAudio": True,
+                "startFrame": start_frame,
+            },
+        )
+    ]
 
 
 def test_provider_failure_clears_checkpoint_and_reports_reason(monkeypatch):
@@ -756,6 +986,42 @@ def test_retry_configuration_cannot_exceed_three_resubmissions(monkeypatch):
         service.process_with_checkpoint(make_task("image"))
 
     assert submissions == 4
+
+
+@pytest.mark.skipif(
+    os.getenv("RUN_MAXCHEAPAI_C2PA_TEST") != "1",
+    reason="set RUN_MAXCHEAPAI_C2PA_TEST=1 to spend credits on a live generation",
+)
+def test_live_video_result_has_trusted_c2pa():
+    if not os.getenv("MAXCHEAPAI_API_KEY"):
+        pytest.fail("MAXCHEAPAI_API_KEY is required for the live C2PA test")
+
+    verifier_path = (
+        Path(__file__).parents[2] / "gas" / "verification" / "c2pa_verification.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "maxcheapai_c2pa_verification", verifier_path
+    )
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+
+    service = MaxCheapAIService()
+    result = service.process_with_checkpoint(
+        make_task(
+            "video",
+            {
+                "resolution": "720p",
+                "duration": 4,
+                "aspect_ratio": "16:9",
+            },
+        )
+    )
+
+    verification = verifier.verify_c2pa(result["data"])
+
+    assert verification.verified, verification.error
+    assert verification.signature_valid, verification.validation_errors
+    assert verification.is_trusted_issuer, verification.cert_issuer
 
 
 def test_registry_reuses_one_maxcheapai_service_for_both_modalities(monkeypatch):

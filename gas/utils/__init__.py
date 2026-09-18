@@ -1,39 +1,56 @@
-"""Lazy public exports for utility modules.
+from .utils import (
+    print_info,
+    fail_with_none,
+    on_block_interval,
+    ExitContext,
+    get_metadata,
+    get_file_modality,
+    run_in_thread,
+)
 
-Importing a miner should not load validator-only image augmentation modules.
-"""
+from .metagraph import (
+    get_miner_uids,
+    create_set_weights,
+)
 
-from importlib import import_module
+from .autoupdater import autoupdate
 
+from .transforms import (
+    apply_random_augmentations,
+    get_base_transforms,
+    get_random_augmentations,
+    get_random_augmentations_medium,
+    get_random_augmentations_hard,
+)
 
-_EXPORTS = {
-    "print_info": "gas.utils.utils",
-    "fail_with_none": "gas.utils.utils",
-    "on_block_interval": "gas.utils.utils",
-    "ExitContext": "gas.utils.utils",
-    "get_metadata": "gas.utils.utils",
-    "get_file_modality": "gas.utils.utils",
-    "run_in_thread": "gas.utils.utils",
-    "get_miner_uids": "gas.utils.metagraph",
-    "create_set_weights": "gas.utils.metagraph",
-    "autoupdate": "gas.utils.autoupdater",
-    "apply_random_augmentations": "gas.utils.transforms",
-    "get_base_transforms": "gas.utils.transforms",
-    "get_random_augmentations": "gas.utils.transforms",
-    "get_random_augmentations_medium": "gas.utils.transforms",
-    "get_random_augmentations_hard": "gas.utils.transforms",
-    "StateManager": "gas.utils.state_manager",
-    "save_validator_state": "gas.utils.state_manager",
-    "load_validator_state": "gas.utils.state_manager",
-}
+from .state_manager import (
+    StateManager,
+    save_validator_state,
+    load_validator_state,
+)
 
-__all__ = list(_EXPORTS)
-
-
-def __getattr__(name):
-    module_name = _EXPORTS.get(name)
-    if module_name is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(module_name), name)
-    globals()[name] = value
-    return value
+__all__ = [
+    # Core utilities
+    "print_info",
+    "fail_with_none", 
+    "on_block_interval",
+    "ExitContext",
+    "get_metadata",
+    "get_file_modality",
+    "run_in_thread",
+    # Metagraph utilities
+    "get_miner_uids",
+    "create_set_weights",
+    # Autoupdater
+    "autoupdate",
+    # Transforms
+    "apply_random_augmentations",
+    "get_base_transforms",
+    "get_random_augmentations",
+    "get_random_augmentations_medium", 
+    "get_random_augmentations_hard",
+    # State management
+    "StateManager",
+    "save_validator_state",
+    "load_validator_state",
+] 

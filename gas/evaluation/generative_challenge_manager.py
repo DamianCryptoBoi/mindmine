@@ -1,17 +1,18 @@
 import asyncio
+import hashlib
 import io
 import json
 import os
 import pickle
-import random
 import tempfile
 import threading
 import time
+import uuid
 
+from concurrent.futures import ThreadPoolExecutor
 import aiohttp
 import bittensor as bt
 import cv2
-import numpy as np
 import requests
 import uvicorn
 from bittensor.core.axon import FastAPIThreadedServer
@@ -21,7 +22,12 @@ from PIL import Image
 from typing import Dict, Optional
 
 from gas.cache.content_manager import ContentManager
+from gas.evaluation.challenge_allocation import (
+    allocate_challenge_slots,
+    resolve_challenge_response_stats,
+)
 from gas.evaluation.resolution_tiers import sample_challenge_tier
+from gas.evaluation.rewards import GeneratorQualification, resolve_generator_qualification
 from gas.protocol.epistula import get_verifier
 from gas.protocol.validator_requests import query_generative_miner
 from gas.types import MediaType, MinerType, Modality
@@ -60,11 +66,27 @@ class GenerativeChallengeManager:
         # Use threading.Lock instead of asyncio.Lock because FastAPIThreadedServer
         # runs in a separate thread with its own event loop
         self.challenge_lock = threading.Lock()
-        self.media_processing_lock = threading.Lock()
 
         # Track generator liveness: hotkey -> last activity timestamp
         # Updated when a generator successfully responds to a challenge
         self.generator_last_seen: Dict[str, float] = {}
+
+        # Fool-rate qualification from the last successful generator-results fetch.
+        # qualification_fresh is False until update_scores writes a live map; a
+        # missing/stale map treats every UID as onboarding so sampling does not
+        # freeze on the last qualified set.
+        self.qualification: Optional[Dict[str, GeneratorQualification]] = None
+        self.qualification_fresh: bool = False
+
+        # Keep expensive OpenCV/C2PA work off the callback event loop, but
+        # bound concurrency so a burst of video uploads cannot create dozens
+        # of memory-heavy decoder/verifier jobs at once.
+        self.media_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="callback-media"
+        )
+
+        self.callback_staging_dir = os.path.join(self.config.cache.base_dir, "callback_staging")
+        os.makedirs(self.callback_staging_dir, exist_ok=True)
 
         self.external_port = (
             getattr(self.config.neuron, 'external_callback_port', None) or
@@ -84,24 +106,23 @@ class GenerativeChallengeManager:
 
         self.init_fastapi()
 
+    def set_qualification(
+        self,
+        qualification: Optional[Dict[str, GeneratorQualification]],
+        fresh: bool = True,
+    ) -> None:
+        """Cache fool-rate qualification by hotkey, never by reusable UID."""
+        self.qualification = qualification
+        self.qualification_fresh = bool(fresh and qualification is not None)
+
     async def issue_generative_challenge(self):
         await self.miner_type_tracker.update_miner_types()
         miner_uids = self.miner_type_tracker.get_miners_by_type(MinerType.GENERATOR)
-
-        if len(miner_uids) > self.config.neuron.sample_size:
-            miner_uids = np.random.choice(
-                miner_uids,
-                size=self.config.neuron.sample_size,
-                replace=False,
-            ).tolist()
 
         if not miner_uids:
             bt.logging.trace("No generative miners found to challenge.")
             return
 
-        bt.logging.info(f"Issuing generative challenge to UIDs: {miner_uids}")
-
-        # Sample prompts per modality, then assign random modality per miner.
         raw = getattr(self.config, 'prompt_modalities', 'video')
         available = []
         for item in raw.split(','):
@@ -113,37 +134,75 @@ class GenerativeChallengeManager:
         if not available:
             available = [Modality.VIDEO]
 
-        # Pre-sample prompts for each modality
+        sample_size = int(self.config.neuron.sample_size)
         prompt_pools = {}
-        n_needed = len(miner_uids)
         for mod in available:
             entries = self.content_manager.sample_prompts(
-                k=n_needed, modality=mod.value, remove=False, strategy="least_used",
+                k=sample_size, modality=mod.value, remove=False, strategy="least_used",
             )
-            prompt_pools[mod] = entries
+            if entries:
+                prompt_pools[mod] = entries
 
-        # Check at least one pool has prompts
-        total_prompts = sum(len(v) for v in prompt_pools.values())
-        if total_prompts == 0:
+        if not prompt_pools:
             bt.logging.info(
                 "Waiting for prompt cache to be populated. Skipping generative challenge."
             )
             return
 
-        # Assign random modality per miner, cycling prompts within each pool.
-        # Only modalities with non-empty pools are eligible — avoids silently
-        # skipping miners when one modality has no cached prompts.
+        available_names = [mod.value for mod in prompt_pools]
+        # Registrations can change between score updates. Resolve identities
+        # for each round so replacements enter onboarding, even with fresh data.
+        qualification = (
+            resolve_generator_qualification(self.qualification, self.metagraph)
+            if self.qualification_fresh and self.qualification is not None else None
+        )
+        scoring = getattr(self.config, "scoring", None)
+        lookback_hours = float(getattr(scoring, "no_answer_lookback_hours", 24.0))
+        response_stats = resolve_challenge_response_stats(
+            self.content_manager.get_challenge_response_stats(
+                lookback_hours=lookback_hours
+            ),
+            self.metagraph,
+        )
+        assignments, pool_stats = allocate_challenge_slots(
+            miner_uids,
+            available_names,
+            qualification,
+            sample_size=sample_size,
+            qualified_slots=int(getattr(self.config.neuron, "qualified_slots", 36)),
+            onboarding_slots=int(getattr(self.config.neuron, "onboarding_slots", 8)),
+            probe_slots=int(getattr(self.config.neuron, "probe_slots", 6)),
+            min_fool_samples=int(getattr(scoring, "min_fool_samples", 20)),
+            response_stats=response_stats,
+            min_no_answer_attempts=int(
+                getattr(scoring, "min_no_answer_attempts", 5)
+            ),
+        )
+
+        if not assignments:
+            bt.logging.trace("No generative miners found to challenge.")
+            return
+
+        bt.logging.info(
+            f"Challenge pools: image_qualified={pool_stats['image_qualified']} "
+            f"video_qualified={pool_stats['video_qualified']} "
+            f"onboarding={pool_stats['onboarding']} probe={pool_stats['probe']} "
+            f"image_unresponsive={pool_stats['image_unresponsive']} "
+            f"video_unresponsive={pool_stats['video_unresponsive']} "
+            f"rolled_onboarding={pool_stats['rolled_onboarding']}"
+        )
+        bt.logging.info(f"Issuing generative challenge to UIDs: {[uid for uid, _ in assignments]}")
+
+        modality_for = {Modality.IMAGE.value: Modality.IMAGE, Modality.VIDEO.value: Modality.VIDEO}
         tasks = []
-        modality_counters = {m: 0 for m in available}
-        for uid in miner_uids:
-            mods_with_prompts = [m for m in available if prompt_pools[m]]
-            if not mods_with_prompts:
-                break
-            mod = random.choice(mods_with_prompts)
-            pool = prompt_pools[mod]
-            ix = modality_counters[mod] % len(pool)
-            modality_counters[mod] += 1
-            tasks.append(self.send_generative_request(uid, pool[ix], mod))
+        modality_counters = {name: 0 for name in available_names}
+        for uid, mod_name in assignments:
+            pool = prompt_pools[modality_for[mod_name]]
+            ix = modality_counters[mod_name] % len(pool)
+            modality_counters[mod_name] += 1
+            tasks.append(
+                self.send_generative_request(uid, pool[ix], modality_for[mod_name])
+            )
 
         await asyncio.gather(*tasks)
 
@@ -200,7 +259,21 @@ class GenerativeChallengeManager:
             )
         else:
             error = response_data.get("error") if response_data else "Unknown error"
-            bt.logging.error(f"Failed to send challenge to UID {uid}. Error: {error}")
+            miner_hotkey = self.metagraph.hotkeys[uid]
+            self.content_manager.record_challenge_outcome(
+                task_id=f"no-answer-{uid}-{uuid.uuid4()}",
+                uid=uid,
+                hotkey=miner_hotkey,
+                prompt_id=prompt_entry.id,
+                modality=modality.value,
+                status="failed",
+                failure_reason="no_answer",
+                requested_resolution=requested_resolution,
+            )
+            bt.logging.error(
+                f"Failed to send challenge to UID {uid}. Error: {error} "
+                f"(recorded no_answer for {modality.value})"
+            )
 
     async def generative_callback(self, request: Request):
         """Callback endpoint for generative challenges.
@@ -298,18 +371,17 @@ class GenerativeChallengeManager:
             bt.logging.error(f"Task {task_id} from {format_uid_info()} (IP: {client_ip}): Empty binary payload received")
             return Response(status_code=400, content="Empty binary payload")
 
-        # Atomically claim the task before yielding to blocking work.
+        # Atomically claim the task so retries cannot enqueue duplicate work.
         with self.challenge_lock:
             bt.logging.debug(f"Callback for task {task_id}: Current active tasks: {list(self.challenge_tasks.keys())}")
             if task_id not in self.challenge_tasks:
-                # Check if this might be a stale task from a previous session
                 bt.logging.debug(f"Received binary upload for unknown task_id: {task_id} from {format_uid_info()} (IP: {client_ip}), content_type: {content_type}, size: {len(binary_data)} bytes")
-                # Accept the upload gracefully but don't process it - this reduces 404 spam
-                # while still indicating the task wasn't found in our debug logs
                 return Response(status_code=200, content="Task not found in current session")
-
-            challenge_info = self.challenge_tasks.pop(task_id)
+            if self.challenge_tasks[task_id].get("status") in ("receiving", "processing"):
+                return Response(status_code=202, content="Callback already accepted")
+            challenge_info = self.challenge_tasks[task_id].copy()
             generator_uid = challenge_info["uid"]
+            self.challenge_tasks[task_id]["status"] = "receiving"
 
         auth_uid_msg = f" (auth UID: {uid})" if uid != generator_uid and uid != "unknown" else ""
         bt.logging.info(
@@ -317,70 +389,181 @@ class GenerativeChallengeManager:
             f"type: {content_type}, size: {len(binary_data)} bytes (IP: {client_ip})"
         )
 
-        # Media decoding, hashing, C2PA verification, and storage are blocking.
-        storage_task = asyncio.create_task(
-            asyncio.to_thread(
-                self.store_binary_content,
-                binary_data,
-                content_type,
-                generator_uid,
-                task_id,
-                challenge_info,
-            )
-        )
-        cancellation = None
+        # A 202 means the validator has durably accepted responsibility. Stage
+        # and fsync the payload before acknowledging it. The database outcome
+        # remains pending (reward-neutral) until real validation completes.
+        staging_path = self._callback_staging_path(task_id)
+        loop = asyncio.get_running_loop()
         try:
-            filepath, error_message = await asyncio.shield(storage_task)
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-            filepath, error_message = await storage_task
-
-        if filepath:
-            bt.logging.success(
-                f"Task {task_id} completed with binary upload: {filepath}"
+            await loop.run_in_executor(
+                None,
+                self._write_staged_callback,
+                staging_path,
+                binary_data,
+                {"task_id": task_id, "content_type": content_type, "uid": generator_uid},
             )
+        except Exception as e:
+            with self.challenge_lock:
+                if task_id in self.challenge_tasks:
+                    self.challenge_tasks[task_id]["status"] = "pending"
+            bt.logging.error(f"Failed staging callback for task {task_id}: {e}")
+            return Response(status_code=503, content="Validator could not accept callback")
 
-            # Track generator liveness - record when they successfully responded
-            miner_hotkey = self.metagraph.hotkeys[generator_uid]
+        with self.challenge_lock:
+            if task_id not in self.challenge_tasks:
+                self._remove_staged_callback(staging_path)
+                return Response(status_code=200, content="Task already processed")
+            self.challenge_tasks[task_id].update({
+                "status": "processing",
+                "staging_path": staging_path,
+                "content_type": content_type,
+                "accepted_at": time.time(),
+            })
+            miner_hotkey = self.challenge_tasks[task_id]["hotkey"]
             self.generator_last_seen[miner_hotkey] = time.time()
-            bt.logging.debug(
-                f"Updated liveness for generator {miner_hotkey[:16]}... (UID {generator_uid})"
-            )
 
-            if cancellation is not None:
-                raise cancellation
-            return Response(status_code=200, content="Binary content received")
+        self.media_executor.submit(
+            self._process_staged_callback,
+            task_id,
+            staging_path,
+            content_type,
+            generator_uid,
+        )
+        return Response(status_code=202, content="Callback accepted")
+
+
+    def _callback_staging_path(self, task_id: str) -> str:
+        name = hashlib.sha256(task_id.encode("utf-8")).hexdigest() + ".payload"
+        return os.path.join(self.callback_staging_dir, name)
+
+    @staticmethod
+    def _write_staged_callback(
+        staging_path: str, binary_data: bytes, metadata: dict
+    ) -> None:
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="callback-", dir=os.path.dirname(staging_path)
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(binary_data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, staging_path)
+            metadata_path = staging_path + ".json"
+            metadata_tmp = metadata_path + ".tmp"
+            with open(metadata_tmp, "w", encoding="utf-8") as f:
+                json.dump(metadata, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(metadata_tmp, metadata_path)
+        except Exception:
+            for path in (tmp_path, staging_path, staging_path + ".json.tmp"):
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+            raise
+
+    @staticmethod
+    def _remove_staged_callback(staging_path: str) -> None:
+        for path in (staging_path, staging_path + ".json"):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    def _process_staged_callback(
+        self, task_id: str, staging_path: str, content_type: str, generator_uid: int
+    ) -> None:
+        try:
+            with open(staging_path, "rb") as f:
+                binary_data = f.read()
+            filepath, error_message = self.store_binary_content(
+                binary_data, content_type, generator_uid, task_id
+            )
+        except Exception as e:
+            bt.logging.exception(
+                f"Infrastructure failure processing callback {task_id}: {e}"
+            )
+            with self.challenge_lock:
+                if task_id in self.challenge_tasks:
+                    self.challenge_tasks[task_id]["status"] = "processing_error"
+            return
 
         failure_reason = error_message or "Failed to store binary content"
-        self.content_manager.update_challenge_outcome(
-            task_id=task_id,
-            status="failed",
-            failure_reason=failure_reason,
+        infrastructure_failure = bool(
+            error_message
+            and (
+                error_message.startswith("Internal error:")
+                or error_message == "Failed to store binary content"
+            )
         )
-        if cancellation is not None:
-            raise cancellation
-        return Response(status_code=400, content=failure_reason)
+        if infrastructure_failure:
+            with self.challenge_lock:
+                if task_id in self.challenge_tasks:
+                    self.challenge_tasks[task_id]["status"] = "processing_error"
+                    self.challenge_tasks[task_id]["processing_error"] = failure_reason
+            return
+
+        self._remove_staged_callback(staging_path)
+        with self.challenge_lock:
+            if task_id not in self.challenge_tasks:
+                bt.logging.warning(f"Completed callback work for missing task {task_id}")
+                return
+            if filepath:
+                self.challenge_tasks[task_id]["status"] = "completed"
+                self.challenge_tasks[task_id]["filepath"] = filepath
+                bt.logging.success(
+                    f"Task {task_id} completed with binary upload: {filepath}"
+                )
+                miner_hotkey = self.metagraph.hotkeys[generator_uid]
+                self.generator_last_seen[miner_hotkey] = time.time()
+                del self.challenge_tasks[task_id]
+                return
+            del self.challenge_tasks[task_id]
+
+        # Only explicit content rejection is a miner failure. Queue, disk, and
+        # worker failures remain pending and therefore reward-neutral.
+        self.content_manager.update_challenge_outcome(
+            task_id=task_id, status="failed", failure_reason=failure_reason
+        )
+
+    def _recover_staged_callbacks(self) -> int:
+        recovered = 0
+        for metadata_path in os.scandir(self.callback_staging_dir):
+            if not metadata_path.name.endswith(".payload.json"):
+                continue
+            staging_path = metadata_path.path[:-5]
+            try:
+                with open(metadata_path.path, "r", encoding="utf-8") as f:
+                    metadata = json.load(f)
+                task_id = metadata["task_id"]
+                content_type = metadata["content_type"]
+                generator_uid = int(metadata["uid"])
+            except Exception as e:
+                bt.logging.error(f"Invalid staged callback metadata {metadata_path.path}: {e}")
+                continue
+            with self.challenge_lock:
+                task = self.challenge_tasks.get(task_id)
+                if task is None or not os.path.exists(staging_path):
+                    continue
+                task.update({
+                    "status": "processing",
+                    "staging_path": staging_path,
+                    "content_type": content_type,
+                })
+            self.media_executor.submit(
+                self._process_staged_callback,
+                task_id,
+                staging_path,
+                content_type,
+                generator_uid,
+            )
+            recovered += 1
+        return recovered
 
     def store_binary_content(
-        self,
-        binary_data: bytes,
-        content_type: str,
-        generator_uid: int,
-        task_id: str,
-        task_info: dict,
-    ) -> tuple[Optional[str], Optional[str]]:
-        with self.media_processing_lock:
-            return self._store_binary_content(
-                binary_data, content_type, generator_uid, task_id, task_info
-            )
-
-    def _store_binary_content(
-        self,
-        binary_data: bytes,
-        content_type: str,
-        generator_uid: int,
-        task_id: str,
-        task_info: dict,
+        self, binary_data: bytes, content_type: str, generator_uid: int, task_id: str
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Store binary content directly uploaded by miner using ContentManager.
@@ -410,6 +593,12 @@ class GenerativeChallengeManager:
                         content_type=content_type,
                     )
                 return None, reason
+
+            # Get task info from challenge tracker
+            task_info = self.challenge_tasks.get(task_id)
+            if not task_info:
+                bt.logging.error(f"Task {task_id} not found in challenge tasks")
+                return None, "Task not found in challenge tasks"
 
             modality = task_info["modality"]
             media_type = task_info["media_type"]
@@ -712,6 +901,8 @@ class GenerativeChallengeManager:
             bt.logging.info("Shutting down webhook server...")
             self.fast_api.stop()
             bt.logging.info("Webhook server stopped")
+        if hasattr(self, "media_executor"):
+            self.media_executor.shutdown(wait=False, cancel_futures=True)
 
     def save_state(self, save_dir: str, filename: str):
         """Save challenge tasks state and generator liveness to disk"""
@@ -721,7 +912,10 @@ class GenerativeChallengeManager:
                 current_time = time.time()
                 stale_tasks = []
                 for task_id, task_info in self.challenge_tasks.items():
-                    if current_time - task_info.get("sent_at", 0) > 7200:
+                    if (
+                        task_info.get("status", "pending") == "pending"
+                        and current_time - task_info.get("sent_at", 0) > 7200
+                    ):
                         stale_tasks.append(task_id)
 
                 for task_id in stale_tasks:
@@ -769,7 +963,8 @@ class GenerativeChallengeManager:
 
                 current_time = time.time()
                 for task_id, task_info in loaded_tasks.items():
-                    if current_time - task_info.get("sent_at", 0) <= 7200:
+                    is_processing = task_info.get("status") != "pending"
+                    if is_processing or current_time - task_info.get("sent_at", 0) <= 7200:
                         valid_tasks[task_id] = task_info
 
             valid_liveness = {}
@@ -790,7 +985,9 @@ class GenerativeChallengeManager:
                 self.challenge_tasks = valid_tasks
                 self.generator_last_seen = valid_liveness
 
+            recovered = self._recover_staged_callbacks()
             bt.logging.info(f"Loaded {len(valid_tasks)} active challenge tasks from {filepath}")
+            bt.logging.info(f"Recovered {recovered} durably staged callbacks")
             bt.logging.info(f"Loaded liveness data for {len(valid_liveness)} generators")
 
             return True

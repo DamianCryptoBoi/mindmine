@@ -92,13 +92,21 @@ PR — we're happy to add new providers and trust anchors.
 - **Modalities**: Image, Video
 - **Image model**: Google Nano Banana Pro (`nano-banana-pro`), honoring the
   requested 1K/2K/4K tier
-- **Video model**: Google Veo 3.1 (`veo-3.1`) with audio; 480p requests use the
-  provider's lowest supported 720p tier
+- **Video model**: Google Veo 3.1 (`veo-3.1`) with audio. Each video first gets
+  a 1K, priority-speed Nano Banana Pro start frame using the video prompt and
+  aspect ratio. If the initial image and three retries fail, generation falls
+  back to text-only Veo. 480p requests use the provider's lowest supported
+  720p tier.
 - **C2PA**: Provider media is downloaded and returned byte-for-byte without
   resizing or transcoding, preserving Google's signed manifest
 - **Timeout and retries**: Each generation may poll for up to 1,800 seconds.
   Provider-reported failures are resubmitted up to three times; transient
   polling and download failures retry the existing request.
+- **Live C2PA test**: Export `MAXCHEAPAI_API_KEY` and run
+  `RUN_MAXCHEAPAI_C2PA_TEST=1 .venv/bin/pytest tests/generator/test_maxcheapai_service.py::test_live_video_result_has_trusted_c2pa`.
+  This spends credits on a priority 1K image plus one real 4-second video
+  (and any configured retries), then verifies the video's signature and
+  trusted issuer with the validator's C2PA verifier.
 - **Website**: [maxcheapai.com](https://maxcheapai.com/en/docs)
 
 ### CKey Service
