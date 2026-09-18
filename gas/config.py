@@ -197,6 +197,13 @@ def add_miner_args(parser):
     )
 
     parser.add_argument(
+        "--miner.worker-threads",
+        type=int,
+        default=int(os.environ.get("MINER_WORKER_THREADS", "2")),
+        help="Number of background generation workers",
+    )
+
+    parser.add_argument(
         "--miner.task-timeout",
         type=float,
         default=300.0,

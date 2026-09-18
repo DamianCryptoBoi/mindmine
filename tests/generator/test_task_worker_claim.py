@@ -41,6 +41,16 @@ def test_worker_thread_count_is_a_supported_miner_argument():
     assert getattr(config, "miner.worker_threads") == 7
 
 
+def test_worker_thread_count_defaults_from_environment(monkeypatch):
+    monkeypatch.setenv("MINER_WORKER_THREADS", "7")
+    parser = argparse.ArgumentParser()
+    add_miner_args(parser)
+
+    config = parser.parse_args([])
+
+    assert getattr(config, "miner.worker_threads") == 7
+
+
 def test_failed_claim_persistence_returns_task_to_pending():
     manager = TaskManager()
     task_id = manager.create_task(
