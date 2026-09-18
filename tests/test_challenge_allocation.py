@@ -210,6 +210,41 @@ def test_slot_counts_must_sum_to_sample_size(tmp_path):
         validate_config_and_neuron_path(config)
 
 
+def test_miner_config_skips_validator_slot_validation(tmp_path):
+    config = SimpleNamespace(
+        logging=SimpleNamespace(logging_dir=str(tmp_path)),
+        wallet=SimpleNamespace(name="w", hotkey="h"),
+        netuid=1,
+        neuron=SimpleNamespace(
+            name="bitmind",
+            sample_size=None,
+            qualified_slots=None,
+            onboarding_slots=None,
+            probe_slots=None,
+        ),
+    )
+
+    validate_config_and_neuron_path(config)
+
+
+def test_partial_validator_slot_config_is_rejected(tmp_path):
+    config = SimpleNamespace(
+        logging=SimpleNamespace(logging_dir=str(tmp_path)),
+        wallet=SimpleNamespace(name="w", hotkey="h"),
+        netuid=1,
+        neuron=SimpleNamespace(
+            name="bitmind",
+            sample_size=50,
+            qualified_slots=36,
+            onboarding_slots=None,
+            probe_slots=6,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must be configured together"):
+        validate_config_and_neuron_path(config)
+
+
 def test_fresh_cache_does_not_give_replacement_qualified_challenge_slots():
     metagraph = SimpleNamespace(hotkeys=["old-owner", "unchanged"])
     cached = get_generator_qualification([

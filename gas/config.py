@@ -42,13 +42,25 @@ def validate_config_and_neuron_path(config):
         os.makedirs(config.neuron.full_path, exist_ok=True)
 
     neuron = getattr(config, "neuron", None)
-    if neuron is not None and hasattr(neuron, "qualified_slots"):
-        slot_total = (
-            int(neuron.qualified_slots)
-            + int(neuron.onboarding_slots)
-            + int(neuron.probe_slots)
+    slot_values = tuple(
+        getattr(neuron, name, None)
+        for name in (
+            "qualified_slots",
+            "onboarding_slots",
+            "probe_slots",
+            "sample_size",
         )
-        sample_size = int(neuron.sample_size)
+    )
+    if any(value is not None for value in slot_values):
+        if any(value is None for value in slot_values):
+            raise ValueError(
+                "neuron qualified_slots, onboarding_slots, probe_slots, and "
+                "sample_size must be configured together"
+            )
+        qualified_slots, onboarding_slots, probe_slots, sample_size = map(
+            int, slot_values
+        )
+        slot_total = qualified_slots + onboarding_slots + probe_slots
         if slot_total != sample_size:
             raise ValueError(
                 "neuron.qualified_slots + onboarding_slots + probe_slots "
