@@ -93,7 +93,8 @@ PR — we're happy to add new providers and trust anchors.
 - **Image model**: Google Nano Banana Pro (`nano-banana-pro`), honoring the
   requested 1K/2K/4K tier
 - **Video model**: Google Veo 3.1 (`veo-3.1`) with audio. Each video first gets
-  a 1K, priority-speed Nano Banana Pro start frame using the video prompt and
+  a 1K, priority-speed Nano Banana Pro start frame using the video prompt
+  prefixed with `generate the start frame for this scene: ` and the requested
   aspect ratio. If the initial image and three retries fail, generation falls
   back to text-only Veo. 480p requests use the provider's lowest supported
   720p tier.

@@ -310,7 +310,7 @@ class MaxCheapAIService(BaseGenerationService):
             aspect_ratio = "16:9"
         return {
             "modelId": IMAGE_MODEL,
-            "prompt": task.prompt,
+            "prompt": f"generate the start frame for this scene: {task.prompt}",
             "resolution": "1K",
             "speed": "priority",
             "aspectRatio": aspect_ratio,

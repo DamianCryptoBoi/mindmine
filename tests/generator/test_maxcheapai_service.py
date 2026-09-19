@@ -154,7 +154,7 @@ def test_image_request_honors_resolution_and_returns_untouched_bytes(monkeypatch
     ]
 
 
-def test_video_request_generates_matching_start_frame_before_veo(monkeypatch):
+def test_video_request_prefixes_start_frame_prompt_before_veo(monkeypatch):
     service = configure_service(monkeypatch)
     original_media = b"\x00\x00\x00\x18ftypisom-provider-c2pa-video"
     submitted = []
@@ -243,7 +243,7 @@ def test_video_request_generates_matching_start_frame_before_veo(monkeypatch):
             "https://maxcheapai.com/api/generate/image",
             {
                 "modelId": "nano-banana-pro",
-                "prompt": "A red fox running through fresh snow",
+                "prompt": "generate the start frame for this scene: A red fox running through fresh snow",
                 "resolution": "1K",
                 "speed": "priority",
                 "aspectRatio": "9:16",
