@@ -119,6 +119,7 @@ def test_primary_model_maps_tiers_to_square_and_preserves_downloaded_bytes(
                 "prompt": "A red fox running through fresh snow",
                 "n": 1,
                 "size": expected_size,
+                "c2pa": True,
             },
             1800.0,
         )

@@ -85,7 +85,7 @@ class CKeyService(BaseGenerationService):
         response = requests.post(
             f"{self.base_url}/images/generations",
             headers=headers,
-            json={"model": model, "prompt": task.prompt, "n": 1, "size": size},
+            json={"model": model, "prompt": task.prompt, "n": 1, "size": size, "c2pa": True},
             timeout=self.request_timeout,
         )
         self._raise_for_status(response, "generation")
