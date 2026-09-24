@@ -107,6 +107,14 @@ class CKeyService(BaseGenerationService):
         self._raise_for_status(download, "download")
         if not download.content:
             raise RuntimeError("CKey download returned empty media")
+        from gas.verification.c2pa_verification import verify_c2pa
+
+        verification = verify_c2pa(download.content)
+        if not (verification.verified and verification.is_trusted_issuer):
+            raise RuntimeError(
+                "CKey image failed C2PA verification: "
+                f"{verification.error or 'invalid or untrusted credentials'}"
+            )
         mime_type = download.headers.get("Content-Type", "image/jpeg").split(";", 1)[0]
         bt.logging.success(
             f"CKey image generated with {model} ({len(download.content)} bytes)"

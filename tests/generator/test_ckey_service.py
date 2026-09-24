@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +35,29 @@ def make_task(parameters=None):
     )
 
 
+def test_service_registry_import_does_not_load_validator_c2pa_verifier():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from neurons.generator.services.service_registry import ServiceRegistry; "
+            "assert 'gas.verification.c2pa_verification' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.fixture
+def valid_c2pa(monkeypatch):
+    monkeypatch.setattr(
+        "gas.verification.c2pa_verification.verify_c2pa",
+        lambda _media: SimpleNamespace(verified=True, is_trusted_issuer=True),
+    )
+
+
 @pytest.mark.parametrize(
     ("resolution", "expected_size"),
     [
@@ -42,7 +68,7 @@ def make_task(parameters=None):
     ],
 )
 def test_primary_model_maps_tiers_to_square_and_preserves_downloaded_bytes(
-    monkeypatch, resolution, expected_size
+    monkeypatch, valid_c2pa, resolution, expected_size
 ):
     from neurons.generator.services.ckey_service import CKeyService
 
@@ -99,7 +125,9 @@ def test_primary_model_maps_tiers_to_square_and_preserves_downloaded_bytes(
     ]
 
 
-def test_fallback_starts_after_three_retries_and_gets_three_retries(monkeypatch):
+def test_fallback_starts_after_three_retries_and_gets_three_retries(
+    monkeypatch, valid_c2pa
+):
     from neurons.generator.services.ckey_service import (
         CKeyService,
         FALLBACK_MODEL,
@@ -154,7 +182,7 @@ def test_registry_selects_ckey_for_image_generation(monkeypatch):
     assert registry.get_service("video") is None
 
 
-def test_media_url_from_any_host_is_downloaded(monkeypatch):
+def test_media_url_from_any_host_is_downloaded(monkeypatch, valid_c2pa):
     from neurons.generator.services.ckey_service import CKeyService
 
     monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
@@ -207,3 +235,101 @@ def test_non_https_media_url_is_rejected_without_fetching(monkeypatch):
         service.process(make_task())
 
     assert downloads == []
+
+
+@pytest.mark.parametrize(
+    "first_verification",
+    [
+        SimpleNamespace(verified=False, is_trusted_issuer=False, error="No C2PA manifest"),
+        SimpleNamespace(verified=True, is_trusted_issuer=False, error="Untrusted issuer"),
+    ],
+)
+def test_retries_generation_when_downloaded_image_fails_c2pa(
+    monkeypatch, first_verification
+):
+    from neurons.generator.services.ckey_service import CKeyService
+
+    monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
+    monkeypatch.setenv("CKEY_RETRY_DELAY", "0")
+    service = CKeyService()
+    submissions = []
+    checked_media = []
+
+    def post(url, headers, json, timeout):
+        submissions.append(json["model"])
+        return FakeResponse(payload={"data": [{"url": "https://example.com/image"}]})
+
+    def get(url, timeout, allow_redirects):
+        return FakeResponse(content=f"image-{len(submissions)}".encode())
+
+    def verify(media):
+        checked_media.append(media)
+        if len(checked_media) == 1:
+            return first_verification
+        return SimpleNamespace(verified=True, is_trusted_issuer=True)
+
+    monkeypatch.setattr("requests.post", post)
+    monkeypatch.setattr("requests.get", get)
+    monkeypatch.setattr(
+        "gas.verification.c2pa_verification.verify_c2pa", verify
+    )
+
+    result = service.process(make_task())
+
+    assert result["data"] == b"image-2"
+    assert submissions == ["wowztools/nano-banana-pro"] * 2
+    assert checked_media == [b"image-1", b"image-2"]
+
+
+def test_c2pa_failures_exhaust_each_models_existing_retry_budget(monkeypatch):
+    from neurons.generator.services.ckey_service import (
+        CKeyService,
+        FALLBACK_MODEL,
+        PRIMARY_MODEL,
+    )
+
+    monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
+    monkeypatch.setenv("CKEY_RETRY_DELAY", "0")
+    service = CKeyService()
+    submissions = []
+
+    def post(url, headers, json, timeout):
+        submissions.append(json["model"])
+        return FakeResponse(payload={"data": [{"url": "https://example.com/image"}]})
+
+    monkeypatch.setattr("requests.post", post)
+    monkeypatch.setattr(
+        "requests.get",
+        lambda *args, **kwargs: FakeResponse(content=b"invalid-c2pa"),
+    )
+    monkeypatch.setattr(
+        "gas.verification.c2pa_verification.verify_c2pa",
+        lambda _media: SimpleNamespace(
+            verified=False, is_trusted_issuer=False, error="No C2PA manifest"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="C2PA.*No C2PA manifest"):
+        service.process(make_task())
+
+    assert submissions == [PRIMARY_MODEL] * 4 + [FALLBACK_MODEL] * 4
+
+
+def test_real_c2pa_verifier_rejects_unsigned_download(monkeypatch):
+    from neurons.generator.services import ckey_service
+
+    monkeypatch.setenv("CKEY_API_KEY", "ckey_test_key")
+    monkeypatch.setenv("CKEY_RETRY_DELAY", "0")
+    monkeypatch.setattr(ckey_service, "RETRIES_PER_MODEL", 0)
+    monkeypatch.setattr(
+        "requests.post",
+        lambda *args, **kwargs: FakeResponse(
+            payload={"data": [{"url": "https://example.com/image"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        "requests.get", lambda *args, **kwargs: FakeResponse(content=b"unsigned-image")
+    )
+
+    with pytest.raises(RuntimeError, match="C2PA"):
+        ckey_service.CKeyService().process(make_task())
