@@ -4,6 +4,7 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
 from dotenv import dotenv_values
 
 
@@ -16,7 +17,9 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-def _fake_project(tmp_path: Path, env_contents: str) -> tuple[Path, dict[str, str], Path]:
+def _fake_project(
+    tmp_path: Path, env_contents: str
+) -> tuple[Path, dict[str, str], Path]:
     project_dir = tmp_path / "miner"
     bin_dir = tmp_path / "bin"
     project_dir.mkdir()
@@ -64,7 +67,9 @@ def _run_setup(
 
 def _read_env(path: Path) -> tuple[dict[str, str], list[str]]:
     assignments = [
-        line for line in path.read_text().splitlines() if line and not line.startswith("#")
+        line
+        for line in path.read_text().splitlines()
+        if line and not line.startswith("#")
     ]
     keys = [line.split("=", 1)[0] for line in assignments]
     return dict(dotenv_values(path)), keys
@@ -162,6 +167,55 @@ def test_creates_multiple_hotkeys_with_the_same_chosen_settings(tmp_path):
         ".env.hotkey-8",
         "startOrRestart gen_miner.config.js",
     ]
+
+
+def test_plenx_video_selection_copies_wrapper_configuration_without_logging_password(
+    tmp_path,
+):
+    project_dir, env, _ = _fake_project(
+        tmp_path,
+        "PLENX_WRAPPER_PASSWORD='plenx # test password'\n"
+        "PLENX_WRAPPER_BASE=https://plenx.example\n"
+        "PLENX_ACCOUNT_ID=11111111-1111-4111-8111-111111111111\n"
+        "PLENX_POLL_TIMEOUT=900\n",
+    )
+    result = _run_setup(project_dir, env, "cold-wallet\nhotkey-7\n1\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated, _ = _read_env(project_dir / ".env.hotkey-7")
+    assert generated["IMAGE_SERVICE"] == "none"
+    assert generated["VIDEO_SERVICE"] == "plenx"
+    assert generated["PLENX_WRAPPER_PASSWORD"] == "plenx # test password"
+    assert generated["PLENX_WRAPPER_BASE"] == "https://plenx.example"
+    assert generated["PLENX_ACCOUNT_ID"] == "11111111-1111-4111-8111-111111111111"
+    assert generated["PLENX_POLL_TIMEOUT"] == "900"
+    assert "MAXCHEAPAI_API_KEY" not in generated
+    assert "Plenx" in result.stdout + result.stderr
+    assert "plenx # test password" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("answers", "image_service", "video_service", "included_key", "excluded_key"),
+    [
+        ("\n2\n", "none", "plenx", "PLENX_WRAPPER_PASSWORD", "OPENAI_API_KEY"),
+        ("1\n\n", "openai", "none", "OPENAI_API_KEY", "PLENX_WRAPPER_PASSWORD"),
+    ],
+)
+def test_empty_selection_disables_modality_and_omits_unused_credentials(
+    tmp_path, answers, image_service, video_service, included_key, excluded_key
+):
+    project_dir, env, command_log = _fake_project(
+        tmp_path,
+        "OPENAI_API_KEY=openai-test-secret\n"
+        "PLENX_WRAPPER_PASSWORD=plenx-test-password\n",
+    )
+    result = _run_setup(project_dir, env, "cold-wallet\nhotkey-7\n" + answers)
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated, _ = _read_env(project_dir / ".env.hotkey-7")
+    assert generated["IMAGE_SERVICE"] == image_service
+    assert generated["VIDEO_SERVICE"] == video_service
+    assert generated[included_key]
+    assert excluded_key not in generated
+    assert "startOrRestart gen_miner.config.js" in command_log.read_text()
 
 
 def test_overwrites_an_existing_hotkey_env_but_preserves_its_port(tmp_path):

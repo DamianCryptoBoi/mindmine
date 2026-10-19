@@ -176,13 +176,56 @@ PR — we're happy to add new providers and trust anchors.
   resumes polling instead of submitting and paying for another image.
 - **Endpoint**: [gpti2.store](https://gpti2.store/v1)
 
+### Plenx Wrapper Service
+- **Password**: `PLENX_WRAPPER_PASSWORD` is the wrapper password, not a Plenx token.
+- **Modality**: Video only (`VIDEO_SERVICE=plenx`), using `omni-flash`.
+  Image support is disabled because the tested image result contained no C2PA manifest.
+- **Endpoint**: `PLENX_WRAPPER_BASE` defaults to `http://127.0.0.1:8000`.
+  Set it to your wrapper's URL when moving the service to a VPS.
+- **Account**: Set `PLENX_ACCOUNT_ID` to a server account UUID, or leave it blank
+  to discover and use the first configured account. Existing jobs always use their
+  checkpointed account, even if the configured account changes.
+- **Parameters**: Sends multipart form data with the prompt, aspect ratio
+  (`16:9` or `9:16`, default `16:9`), positive duration (default 4 seconds), and
+  resolution (`720`, `1080`, or `4k`; `720p`/`1080p` are normalized). Other aspect
+  ratios and resolutions fall back to `16:9` and `720`. The wrapper resolves its
+  default server and the account's default workplace.
+- **Polling**: Retries transient status GET failures with bounded backoff and
+  honors `Retry-After`. Polling stops after `PLENX_POLL_TIMEOUT` (default 1800 seconds).
+  Generation POSTs are never automatically retried.
+- **Restart safety**: Checkpoints save the wrapper URL, original account ID,
+  upstream task ID, and local wrapper request ID. A restart resumes polling the
+  existing task. If interrupted during submission before these IDs are saved,
+  the service reports an unknown outcome; inspect `/api/requests` before manually
+  submitting another generation. There is no idempotency key or account rotation.
+  Recovery applies to interrupted active tasks; a polling deadline or download
+  error ends the miner task under the existing lifecycle. The upstream job is
+  not cancelled and remains available in the wrapper's history.
+- **Media**: Downloads the returned HTTPS video URL without wrapper credentials
+  and returns its bytes unchanged. This adapter does not verify C2PA credentials.
+
+```bash
+VIDEO_SERVICE=plenx
+PLENX_WRAPPER_BASE=http://127.0.0.1:8000
+PLENX_WRAPPER_PASSWORD=your-wrapper-password
+# PLENX_ACCOUNT_ID=your-server-account-uuid
+```
+
+For the hotkey setup script, add `PLENX_WRAPPER_BASE` and
+`PLENX_WRAPPER_PASSWORD` to the repository's `.env` file, then run
+`bash setup-gen-miner-hotkey.sh` and select **Plenx** for video. The script copies
+the password and selected wrapper URL, account, and timeout settings into each
+generated hotkey environment file. Press **Enter** at either service selection
+to skip that modality; the script writes `none` to disable it. At least one
+modality must remain enabled.
+
 ### Service Selection
 
 Configure which service handles each modality in your `.env.gen_miner` file:
 
 ```bash
 IMAGE_SERVICE=gpti2         # openai, openrouter, stabilityai, maxcheapai, ckey, vertexai, vertexgen, gpti2, or none
-VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, or none
+VIDEO_SERVICE=maxcheapai    # openai, openrouter, runway, maxcheapai, plenx, or none
 GPTI2_API_KEY=sk-your-key
 GPTI2_MODEL=gpt-image-2.5-sunburst
 MAXCHEAPAI_API_KEY=mcai_your_key
@@ -352,6 +395,10 @@ Your miner exposes these endpoints for validators:
 - `CKEY_DOWNLOAD_TIMEOUT`: CKey media download timeout (default: 600 seconds)
 - `CKEY_RETRY_DELAY`: Delay between CKey attempts (default: 10 seconds)
 - `GPTI2_MODEL`: GPTi2 image model (default: `gpt-image-2.5-sunburst`)
+- `PLENX_REQUEST_TIMEOUT`: Plenx submission and status request timeout (default: 60 seconds)
+- `PLENX_POLL_INTERVAL`: Delay between Plenx status requests (default: 5 seconds)
+- `PLENX_POLL_TIMEOUT`: Plenx polling deadline (default: 1800 seconds)
+- `PLENX_DOWNLOAD_TIMEOUT`: Plenx video download timeout (default: 600 seconds)
 - `VERTEXAI_PROJECT`: Vertex AI Google Cloud project; falls back to
   `GOOGLE_CLOUD_PROJECT`, then the project discovered from ADC
 - `VERTEXAI_LOCATION`: Vertex endpoint location (default: `global`)

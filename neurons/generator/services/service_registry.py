@@ -9,6 +9,7 @@ from .gpti2_service import GPTi2Service
 from .maxcheapai_service import MaxCheapAIService
 from .openai_service import OpenAIService
 from .openrouter_service import OpenRouterService
+from .plenx_service import PlenxService
 from .runway_service import RunwayService
 from .stabilityai_service import StabilityAIService
 from .vertexai_service import VertexAIService
@@ -24,6 +25,7 @@ SERVICE_MAP = {
     "vertexai": VertexAIService,
     "vertexgen": VertexGenService,
     "gpti2": GPTi2Service,
+    "plenx": PlenxService,
     # "local": LocalService,  # disabled: local generation has no C2PA provenance,
     # so it fails validator verification. See local_service.py header before enabling.
 }
@@ -35,7 +37,7 @@ class ServiceRegistry:
 
     Set per-modality service via env vars:
       IMAGE_SERVICE=openai|openrouter|stabilityai|maxcheapai|ckey|vertexai|vertexgen|gpti2|none
-      VIDEO_SERVICE=openai|openrouter|stabilityai|runway|maxcheapai|none
+      VIDEO_SERVICE=openai|openrouter|stabilityai|runway|maxcheapai|plenx|none
 
     Services:
       - openai: DALL-E 3 / Sora video (requires OPENAI_API_KEY) - produces C2PA-signed content
@@ -49,6 +51,7 @@ class ServiceRegistry:
       - vertexai: Nano Banana Pro images through Vertex AI (uses Google ADC)
       - vertexgen: Nano Banana Pro images through VertexGen (requires VERTEXGEN_API_KEY)
       - gpti2: GPT Image generation through GPTi2 (requires GPTI2_API_KEY)
+      - plenx: Video through the Plenx wrapper (requires PLENX_WRAPPER_PASSWORD)
       - none: Disable this modality (requests will be rejected)
 
     If not set, falls back to loading all available services.
@@ -179,7 +182,7 @@ class ServiceRegistry:
             ),
             "VIDEO_SERVICE": (
                 "Service for videos: openai, openrouter, stabilityai, runway, "
-                "maxcheapai, or none"
+                "maxcheapai, plenx, or none"
             ),
         }
 

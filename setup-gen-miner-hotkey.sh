@@ -77,6 +77,7 @@ service_label() {
         ckey) printf 'CKey' ;;
         vertexgen) printf 'VertexGen' ;;
         gpti2) printf 'GPTi2' ;;
+        plenx) printf 'Plenx' ;;
         *) return 1 ;;
     esac
 }
@@ -97,6 +98,7 @@ service_key_name() {
         ckey) printf 'CKEY_API_KEY' ;;
         vertexgen) printf 'VERTEXGEN_API_KEY' ;;
         gpti2) printf 'GPTI2_API_KEY' ;;
+        plenx) printf 'PLENX_WRAPPER_PASSWORD' ;;
         none) printf '' ;;
         *) return 1 ;;
     esac
@@ -124,11 +126,15 @@ choose_service() {
     for ((index = 0; index < ${#options[@]}; index++)); do
         printf '  %d) %s\n' "$((index + 1))" "$(service_label "${options[$index]}")" >&2
     done
-    printf '  %d) None\n' "$(( ${#options[@]} + 1 ))" >&2
+    printf '  %d) None (skip)\n' "$(( ${#options[@]} + 1 ))" >&2
 
     while true; do
-        printf 'Select %s service: ' "$modality" >&2
+        printf 'Select %s service [Enter to skip]: ' "$modality" >&2
         IFS= read -r choice || fail "No $modality service selection was provided."
+        if [[ -z "$choice" ]]; then
+            printf 'none'
+            return
+        fi
         if [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#options[@]})); then
             printf '%s' "${options[$((choice - 1))]}"
             return
@@ -137,13 +143,13 @@ choose_service() {
             printf 'none'
             return
         fi
-        printf 'Enter a number from 1 to %d.\n' "$(( ${#options[@]} + 1 ))" >&2
+        printf 'Enter a number from 1 to %d, or press Enter to skip.\n' "$(( ${#options[@]} + 1 ))" >&2
     done
 }
 
 is_provider_key() {
     case "$1" in
-        OPENAI_API_KEY|OPEN_ROUTER_API_KEY|STABILITY_API_KEY|RUNWAYML_API_KEY|RUNWAYML_API_SECRET|MAXCHEAPAI_API_KEY|CKEY_API_KEY|VERTEXGEN_API_KEY|GPTI2_API_KEY)
+        OPENAI_API_KEY|OPEN_ROUTER_API_KEY|STABILITY_API_KEY|RUNWAYML_API_KEY|RUNWAYML_API_SECRET|MAXCHEAPAI_API_KEY|CKEY_API_KEY|VERTEXGEN_API_KEY|GPTI2_API_KEY|PLENX_WRAPPER_PASSWORD)
             return 0
             ;;
         *) return 1 ;;
@@ -220,7 +226,7 @@ for service in openai openrouter stabilityai maxcheapai ckey vertexgen gpti2; do
 done
 
 video_options=()
-for service in openai openrouter runway maxcheapai; do
+for service in openai openrouter runway maxcheapai plenx; do
     has_service_key "$service" && video_options+=("$service")
 done
 
@@ -228,8 +234,8 @@ if [[ ${#image_options[@]} -eq 0 && ${#video_options[@]} -eq 0 ]]; then
     fail "No image or video service API keys are configured in .env."
 fi
 
-image_service="$(choose_service image "${image_options[@]}")"
-video_service="$(choose_service video "${video_options[@]}")"
+image_service="$(choose_service image ${image_options[@]+"${image_options[@]}"})"
+video_service="$(choose_service video ${video_options[@]+"${video_options[@]}"})"
 if [[ "$image_service" == none && "$video_service" == none ]]; then
     fail "At least one image or video service must be enabled."
 fi
@@ -269,6 +275,13 @@ replacement_keys=(
 if [[ -n "$video_key" ]] && ! contains_key "$video_key" "${replacement_keys[@]}"; then
     replacement_keys+=("$video_key")
 fi
+if [[ "$video_service" == plenx ]]; then
+    for key in PLENX_WRAPPER_BASE PLENX_ACCOUNT_ID PLENX_REQUEST_TIMEOUT PLENX_POLL_INTERVAL PLENX_POLL_TIMEOUT PLENX_DOWNLOAD_TIMEOUT; do
+        if [[ -n "$(read_env_value "$key")" ]]; then
+            replacement_keys+=("$key")
+        fi
+    done
+fi
 
 replacement_value() {
     case "$1" in
@@ -287,7 +300,7 @@ replacement_value() {
         MINER_STATE_DIR) printf './miner_generated_content/.gen_miner_state/%s' "$hotkey" ;;
         BT_LOGGING_LEVEL) printf 'INFO' ;;
         AUTO_UPDATE) printf 'false' ;;
-        "$image_key"|"$video_key") read_env_rhs "$1" ;;
+        "$image_key"|"$video_key"|PLENX_*) read_env_rhs "$1" ;;
         *) return 1 ;;
     esac
 }
