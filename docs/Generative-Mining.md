@@ -179,7 +179,12 @@ PR — we're happy to add new providers and trust anchors.
 ### Plenx Wrapper Service
 - **Password**: `PLENX_WRAPPER_PASSWORD` is the wrapper password, not a Plenx token.
 - **Modality**: Video only (`VIDEO_SERVICE=plenx`), using `omni-flash`.
-  Image support is disabled because the tested image result contained no C2PA manifest.
+- **Reference image first**: Each new video task first generates one 1K image through
+  Plenx's `image/gem-pix-2` queue, prefixing the video prompt with
+  `Generate the start frame for this video: ` and using the same aspect ratio. Its URL is
+  sent to video generation as the single JSON-encoded `reference_images` field.
+  Reference generation uses Plenx regardless of the configured `IMAGE_SERVICE`.
+  Direct image tasks remain unsupported by this adapter.
 - **Endpoint**: `PLENX_WRAPPER_BASE` defaults to `http://127.0.0.1:8000`.
   Set it to your wrapper's URL when moving the service to a VPS.
 - **Account**: Set `PLENX_ACCOUNT_ID` to a server account UUID, or leave it blank
@@ -188,14 +193,25 @@ PR — we're happy to add new providers and trust anchors.
 - **Parameters**: Sends multipart form data with the prompt, aspect ratio
   (`16:9` or `9:16`, default `16:9`), positive duration (default 4 seconds), and
   resolution (`720`, `1080`, or `4k`; `720p`/`1080p` are normalized). Other aspect
-  ratios and resolutions fall back to `16:9` and `720`. The wrapper resolves its
-  default server and the account's default workplace.
+  ratios and resolutions fall back to `16:9` and `720`. Optional task parameters
+  `server_id` and `workplace_id` are validated as UUIDs and forwarded; otherwise the
+  wrapper resolves its defaults. Voice and video-mode settings use the wrapper's
+  defaults; unsupported `voice_id` and `video_mode` fields are not sent.
 - **Polling**: Retries transient status GET failures with bounded backoff and
   honors `Retry-After`. Polling stops after `PLENX_POLL_TIMEOUT` (default 1800 seconds).
-  Generation POSTs are never automatically retried.
-- **Restart safety**: Checkpoints save the wrapper URL, original account ID,
-  upstream task ID, and local wrapper request ID. A restart resumes polling the
-  existing task. If interrupted during submission before these IDs are saved,
+  New jobs are polled by local wrapper request ID, including HTTP 202 `waiting`
+  jobs whose upstream task ID is initially null.
+- **Generation retries**: Each image/video stage gets one initial attempt plus
+  at most **three retries** after a job reports `failed`, `error`, or
+  `success:false`. Video retries reuse the completed reference image. Cancelled
+  jobs are not retried. Transport errors, uncertain submissions, poll failures,
+  and polling timeouts do not trigger another generation POST.
+- **Restart safety**: Checkpoints save the current image/video stage, retry count,
+  wrapper URL, original account ID, upstream task ID when available, local wrapper
+  request ID, and completed reference image URL. A restart resumes the current
+  stage without regenerating a completed image or resetting the retry allowance.
+  Existing text-only video checkpoints still finish their original jobs.
+  If interrupted during submission before acceptance is saved,
   the service reports an unknown outcome; inspect `/api/requests` before manually
   submitting another generation. There is no idempotency key or account rotation.
   Recovery applies to interrupted active tasks; a polling deadline or download
